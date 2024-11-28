@@ -1,116 +1,111 @@
-# rlhf_ai_ml
-Reinforcement Learning with Human Feedback (RLHF) for Educational AI
-Overview
-This project implements Reinforcement Learning with Human Feedback (RLHF) using GPT-Neo fine-tuned on the Dolly 15k dataset. The goal is to align AI-generated responses with human preferences in educational contexts. The approach integrates:
+# **Reinforcement Learning with Human Feedback (RLHF) for Educational AI**
 
-Supervised Fine-Tuning (SFT): Initial model training using prompt-response pairs.
-Reward Model (RM): Trained to score responses based on human preference.
-Proximal Policy Optimization (PPO): Reinforcement learning to optimize the language model using the reward signal.
-Key Features
-Human-Aligned Outputs: Improved factual accuracy and coherence of AI responses.
-Generalization Across Domains: Robustness to out-of-distribution (OOD) prompts.
-Efficient Training: Gradient accumulation and optimized batch sizes for GPU scalability.
+---
 
-Installation
-1. Clone the Repository
-bash
-Copy code
+## **Project Overview**
+This project implements **Reinforcement Learning with Human Feedback (RLHF)** to align AI-generated responses with human preferences in educational settings. By combining **Supervised Fine-Tuning (SFT)**, a **Reward Model (RM)**, and **Proximal Policy Optimization (PPO)**, the project enhances response coherence, factual accuracy, and user alignment.
+
+---
+
+## **Features**
+- **Human-Aligned Outputs:** Generates factually accurate and contextually relevant responses to educational prompts.
+- **Generalization Across Domains:** Performs well on out-of-distribution (OOD) prompts like science, history, and biology.
+- **Efficient Training Pipeline:** Optimized with gradient accumulation and smaller batch sizes for GPU efficiency.
+
+---
+
+## **Installation**
+
+### **1. Clone the Repository**
+```bash
 git clone https://github.com/your-username/rlhf_ai_ml.git
 cd rlhf_ai_ml
-2. Install Dependencies
-bash
-Copy code
+```
+
+### **2. Install Dependencies**
+```bash
 pip install -r requirements.txt
-3. Download Dolly Dataset
-The project uses the Dolly 15k dataset. It is automatically downloaded using Hugging Face Datasets.
+```
 
-File Structure
-graphql
-Copy code
-rlhf_ai_ml/
-├── main.py               # Main script for running SFT, RM, and PPO
-├── reward_model.py       # Definition of the custom Reward Model
-├── dataloader.py         # Custom DataLoader for tokenizing and loading Dolly dataset
-├── models/               # Directory for saving trained models
-│   ├── rlhf_gpt_neo_model/
-│   │   ├── config.json
-│   │   ├── pytorch_model.bin
-│   │   ├── tokenizer.json
-│   ├── rlhf_reward_model.pth
-├── requirements.txt      # Python dependencies
-└── README.md             # Documentation
-How to Run
-Supervised Fine-Tuning
+### **3. Dataset**
+This project uses the **Dolly 15k dataset**, which is automatically downloaded using Hugging Face Datasets.
 
-bash
-Copy code
+---
+
+## **How to Run**
+
+### **1. Supervised Fine-Tuning**
+Train the model with supervised fine-tuning on the Dolly 15k dataset:
+```bash
 python main.py --phase sft
-Reward Model Training
+```
 
-bash
-Copy code
+### **2. Reward Model Training**
+Train the reward model to score human-preferred outputs:
+```bash
 python main.py --phase reward
-Reinforcement Learning with PPO
+```
 
-bash
-Copy code
+### **3. Reinforcement Learning with PPO**
+Optimize the language model using Proximal Policy Optimization (PPO):
+```bash
 python main.py --phase ppo
-Test Model
+```
 
-bash
-Copy code
+### **4. Test the Model**
+Evaluate the fine-tuned model on test prompts:
+```bash
 python main.py --phase test
-Results
-Key Metrics
-BLEU Score: Measures the similarity between model responses and human-preferred outputs.
-Reward Alignment: Quantifies how well the outputs match human feedback.
-Out-of-Distribution Robustness: Evaluates performance on unseen prompts.
-Visualizations
-Bar Graph: Reward Scores Across Baselines
-Random Responses (RR), Supervised Fine-Tuning (SFT), Reward-Only (RO), RLHF (SPP).
-Line Graph: Model Performance Across OOD Sensitivity
-Compares robustness of RLHF vs. baselines.
-Include images:
+```
 
-Pre-Trained Models
-Pre-trained models are available for download:
+---
 
-Fine-Tuned GPT-Neo: Download Here
-Reward Model: Download Here
-Challenges and Insights
-Challenges
-High GPU memory usage during reward model training.
-Ensuring factual accuracy in outputs using human preferences.
-Managing long training times on limited resources.
-Insights
-RLHF effectively balances exploration and exploitation, improving coherence.
-Combining SFT and PPO leads to significant performance improvements.
-Future Work
-Experimenting with larger models like GPT-3.
-Incorporating advanced toxicity filtering mechanisms.
-Expanding datasets to include diverse educational queries.
-Contributing
-We welcome contributions to this project! Follow these steps:
+## **Results**
 
-Fork the repository.
-Create a new branch:
-bash
-Copy code
-git checkout -b feature/new-feature
-Commit your changes:
-bash
-Copy code
-git commit -m "Add new feature"
-Push to your fork:
-bash
-Copy code
-git push origin feature/new-feature
-Open a Pull Request.
-License
-This project is licensed under the MIT License.
+### **Key Metrics**
+- **BLEU Score:** Measures similarity between model outputs and human-preferred responses.
+- **Reward Alignment:** Quantifies alignment with human feedback.
+- **Out-of-Distribution Robustness:** Evaluates model performance on unseen prompts.
 
-Acknowledgements
-Hugging Face Transformers for model and tokenizer integration.
-Databricks Dolly 15k for providing the dataset.
-PyTorch Framework for building and training the models.
+### **Visualizations**
+- **Bar Graph:** Reward scores for baselines (Random Responses, SFT, PPO).
+- **Line Graph:** Model performance on out-of-distribution prompts.
 
+---
+
+## **Pre-Trained Models**
+Download pre-trained models for testing:
+- **Fine-Tuned GPT-Neo Model:** [Download Here](https://huggingface.co/your-model-link)
+- **Reward Model:** [Download Here](https://huggingface.co/your-reward-model-link)
+
+---
+
+## **Challenges and Insights**
+
+### **Challenges**
+- **High Memory Usage:** Required optimizations like gradient accumulation for GPU efficiency.
+- **Toxicity Filtering:** Manual intervention needed for improved safety.
+- **Long Training Time:** RLHF required several hours per epoch on a T4 GPU.
+
+### **Insights**
+- RLHF effectively balances exploration and exploitation, resulting in coherent responses.
+- Combining SFT and PPO significantly improves reward alignment and factual accuracy.
+
+---
+
+## **Future Work**
+- Experimenting with larger models like GPT-3.
+- Improving toxicity filtering with advanced evaluation techniques.
+- Expanding datasets to include a broader range of queries.
+
+---
+
+## **License**
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## **Acknowledgements**
+- **Hugging Face Transformers** for model and tokenizer integration.
+- **Databricks Dolly 15k Dataset** for fine-tuning.
+- **PyTorch Framework** for model training and customization.
