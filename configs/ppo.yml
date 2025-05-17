@@ -1,0 +1,17 @@
+model: EleutherAI/gpt-neo-125M
+reward_model_dir: models/reward_model
+
+dataset:
+  name: databricks/databricks-dolly-15k
+  subset_size: 5000
+  max_seq_length: 512
+
+training:
+  epochs: 3
+  batch_size: 4
+  learning_rate: 5e-5
+  clip_epsilon: 0.2
+  logging_steps: 50
+
+output:
+  model_dir: models/ppo_model
