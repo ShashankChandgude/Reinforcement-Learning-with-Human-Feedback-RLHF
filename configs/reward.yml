@@ -5,7 +5,11 @@ dataset:
   name: databricks/databricks-dolly-15k
   subset_size: 5000
   max_seq_length: 512
-  clean: true 
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
 
 training:
   epochs: 3
