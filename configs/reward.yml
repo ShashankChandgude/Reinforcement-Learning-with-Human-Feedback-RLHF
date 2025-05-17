@@ -1,7 +1,7 @@
-# configs/reward.yaml
 model: EleutherAI/gpt-neo-125M
 
 dataset:
+  loader: reward
   name: databricks/databricks-dolly-15k
   subset_size: 5000
   max_seq_length: 512

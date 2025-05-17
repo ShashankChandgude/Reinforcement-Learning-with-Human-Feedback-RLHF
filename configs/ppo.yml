@@ -2,6 +2,7 @@ model: EleutherAI/gpt-neo-125M
 reward_model_dir: models/reward_model
 
 dataset:
+  loader: sft
   name: databricks/databricks-dolly-15k
   subset_size: 5000
   max_seq_length: 512
