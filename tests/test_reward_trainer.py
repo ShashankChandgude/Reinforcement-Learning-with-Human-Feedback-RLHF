@@ -50,15 +50,16 @@ class DummyRewardModel(nn.Module):
 @pytest.fixture(autouse=True)
 def patch_dependencies(monkeypatch, tmp_path):
     import transformers
-    monkeypatch.setattr(transformers.AutoTokenizer,   'from_pretrained', DummyTokenizer.from_pretrained)
+    from torch.utils.data import TensorDataset
+    # Patch tokenizer & base model
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', DummyTokenizer.from_pretrained)
     monkeypatch.setattr(transformers.AutoModelForCausalLM, 'from_pretrained', DummyBaseModel.from_pretrained)
 
     import data.data_loader as dl_mod
-    from torch.utils.data import TensorDataset
-    def dummy_load_reward(tokenizer, dataset_name, subset_size, max_length):
+    def dummy_load_reward(tokenizer, dataset_name, subset_size, max_length, clean=False):
         data = torch.ones((subset_size, max_length), dtype=torch.long)
-        label = torch.ones((subset_size,), dtype=torch.long)
-        return TensorDataset(data, data, data, data, label)
+        # five elements needed for reward trainer
+        return TensorDataset(data, data, data, data, torch.ones(subset_size, dtype=torch.long))
     monkeypatch.setattr(dl_mod, 'load_reward_dataset', dummy_load_reward)
 
     import training.reward_trainer as rt_mod

@@ -5,6 +5,7 @@ dataset:
   name: databricks/databricks-dolly-15k
   subset_size: 5000
   max_seq_length: 512
+  clean: true 
 
 training:
   epochs: 3

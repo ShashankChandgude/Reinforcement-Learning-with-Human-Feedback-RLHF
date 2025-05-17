@@ -1,13 +1,17 @@
+# data/prepare_reward.py
+
 from datasets import load_dataset
 from torch.utils.data import Dataset
+from utils.text_cleaner import clean_text
 import random
 
-def prepare_reward_dataset(dataset_name: str, subset_size: int, tokenizer, max_length: int) -> Dataset:
-    """
-    Generate a preference dataset for reward model training.
-    For each prompt, pairs the original response with a random other response.
-    Label 1 indicates the first response is preferred.
-    """
+def prepare_reward_dataset(
+    dataset_name: str,
+    subset_size: int,
+    tokenizer,
+    max_length: int,
+    clean: bool = False
+) -> Dataset:
     raw = load_dataset(dataset_name)
     split = raw.get("train") or raw.get("validation") or raw[list(raw.keys())[0]]
     subset = split.select(range(min(subset_size, len(split))))
@@ -15,23 +19,27 @@ def prepare_reward_dataset(dataset_name: str, subset_size: int, tokenizer, max_l
     responses = subset["response"] if "response" in subset.column_names else subset["completion"]
 
     class RewardDataset(Dataset):
-        def __init__(self, prompts, responses, tokenizer, max_length):
+        def __init__(self, prompts, responses, tokenizer, max_length, clean):
             self.items = []
             self.tokenizer = tokenizer
             self.max_length = max_length
+            self.clean = clean
             for i, p in enumerate(prompts):
                 r1 = responses[i]
-                j = random.randrange(len(responses))
-                r2 = responses[j]
+                r2 = responses[random.randrange(len(responses))]
                 self.items.append((p, r1, r2))
 
         def __len__(self):
             return len(self.items)
 
         def __getitem__(self, idx):
-            prompt, r1, r2 = self.items[idx]
-            t1 = f"{prompt} {r1}"
-            t2 = f"{prompt} {r2}"
+            p, r1, r2 = self.items[idx]
+            if self.clean:
+                p = clean_text(p)
+                r1 = clean_text(r1)
+                r2 = clean_text(r2)
+            t1 = f"{p} {r1}"
+            t2 = f"{p} {r2}"
             tok1 = self.tokenizer(
                 t1,
                 max_length=self.max_length,
@@ -52,4 +60,4 @@ def prepare_reward_dataset(dataset_name: str, subset_size: int, tokenizer, max_l
                 1
             )
 
-    return RewardDataset(prompts, responses, tokenizer, max_length)
+    return RewardDataset(prompts, responses, tokenizer, max_length, clean)

@@ -53,12 +53,13 @@ class DummyRewardModel(nn.Module):
 @pytest.fixture(autouse=True)
 def patch_all(monkeypatch, tmp_path):
     import transformers
-    monkeypatch.setattr(transformers.AutoTokenizer,   'from_pretrained', DummyTokenizer.from_pretrained)
+    from torch.utils.data import TensorDataset
+    # Patch tokenizer and policy model
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', DummyTokenizer.from_pretrained)
     monkeypatch.setattr(transformers.AutoModelForCausalLM, 'from_pretrained', DummyPolicyModel.from_pretrained)
 
     import data.data_loader as dl_mod
-    from torch.utils.data import TensorDataset
-    def dummy_load_sft(tokenizer, dataset_name, subset_size, max_length):
+    def dummy_load_sft(tokenizer, dataset_name, subset_size, max_length, clean=False):
         data = torch.ones((subset_size, max_length), dtype=torch.long)
         return TensorDataset(data, data)
     monkeypatch.setattr(dl_mod, 'load_sft_dataset', dummy_load_sft)
