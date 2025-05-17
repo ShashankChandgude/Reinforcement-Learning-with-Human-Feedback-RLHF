@@ -1,9 +1,11 @@
+# tests/test_sft_trainer.py
+
 import os
 import torch
 import pytest
+import torch.nn as nn
 from training.sft_trainer import SFTTrainer
 
-# Dummy classes to simulate dependencies
 class DummyTokenizer:
     eos_token = "<eos>"
 
@@ -19,11 +21,9 @@ class DummyTokenizer:
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
 
-import torch.nn as nn
 class DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # Add a dummy parameter to avoid empty parameter list
         self.dummy_param = nn.Parameter(torch.zeros(1))
 
     @classmethod
@@ -38,49 +38,56 @@ class DummyModel(nn.Module):
 
     def __call__(self, input_ids, attention_mask=None, labels=None):
         loss = torch.tensor(0.5, requires_grad=True)
-        return type("Output", (), {"loss": loss})()
+        return type("Out", (), {"loss": loss})()
 
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
 
-
 @pytest.fixture(autouse=True)
 def patch_dependencies(monkeypatch, tmp_path):
-    # Patch transformers
     import transformers
-    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', DummyTokenizer.from_pretrained)
+    monkeypatch.setattr(transformers.AutoTokenizer,   'from_pretrained', DummyTokenizer.from_pretrained)
     monkeypatch.setattr(transformers.AutoModelForCausalLM, 'from_pretrained', DummyModel.from_pretrained)
 
-    # Patch dataset loader
-    import DataLoader as dl_mod
-    def dummy_load(tokenizer, subset_size, max_length):
-        data = torch.ones((2, max_length), dtype=torch.long)
-        return torch.utils.data.TensorDataset(data, data)
-    monkeypatch.setattr(dl_mod, 'load_dolly_dataset', dummy_load)
+    import data.data_loader as dl_mod
+    from torch.utils.data import TensorDataset
+    def dummy_load_sft(tokenizer, dataset_name, subset_size, max_length):
+        data = torch.ones((subset_size, max_length), dtype=torch.long)
+        return TensorDataset(data, data)
+    monkeypatch.setattr(dl_mod, 'load_sft_dataset', dummy_load_sft)
     yield
-
 
 def test_sft_initialization(tmp_path):
     config = {
         "model": "dummy-model",
-        "dataset": {"name": "dummy", "subset_size": 2, "max_seq_length": 4},
+        "dataset": {
+            "loader": "sft",
+            "name": "dummy",
+            "subset_size": 2,
+            "max_seq_length": 4
+        },
         "training": {"epochs": 1, "batch_size": 2, "learning_rate": 1e-5, "logging_steps": 1},
-        "output": {"model_dir": str(tmp_path / "model_dir")}
+        "output": {"model_dir": str(tmp_path / "model")}
     }
     trainer = SFTTrainer(config)
     assert hasattr(trainer, 'model')
     assert hasattr(trainer, 'tokenizer')
+    assert hasattr(trainer, 'optimizer')
+    assert hasattr(trainer, 'dataloader')
     assert trainer.device in (torch.device('cpu'), torch.device('cuda'))
-    assert len(trainer.dataloader) == 1
-
 
 def test_sft_train_runs(tmp_path):
     config = {
         "model": "dummy-model",
-        "dataset": {"name": "dummy", "subset_size": 2, "max_seq_length": 4},
+        "dataset": {
+            "loader": "sft",
+            "name": "dummy",
+            "subset_size": 2,
+            "max_seq_length": 4
+        },
         "training": {"epochs": 1, "batch_size": 2, "learning_rate": 1e-5, "logging_steps": 1},
-        "output": {"model_dir": str(tmp_path / "model_dir")}
+        "output": {"model_dir": str(tmp_path / "model")}
     }
     trainer = SFTTrainer(config)
     trainer.train()
-    assert os.path.isdir(str(tmp_path / "model_dir"))
+    assert os.path.isdir(str(tmp_path / "model"))

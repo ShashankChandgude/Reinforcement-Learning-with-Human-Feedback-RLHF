@@ -1,3 +1,6 @@
+# training/reward_trainer.py
+
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
@@ -54,5 +57,6 @@ class RewardTrainer:
 
     def _save_model(self):
         out = self.config.get("output", {}).get("model_dir", "models/reward_model")
+        os.makedirs(out, exist_ok=True)
         torch.save(self.model.state_dict(), f"{out}/reward_model.pth")
         self.logger.info(f"Saved reward model to {out}")
