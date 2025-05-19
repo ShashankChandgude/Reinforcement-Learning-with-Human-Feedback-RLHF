@@ -3,11 +3,11 @@ phase: evaluate
 model_dir: models/ppo_model
 
 dataset:
-  loader: ood
-  name: allenai/legal-qa            
-  subset_size: 200                  
+  loader: sft
+  name: databricks/databricks-dolly-15k
+  subset_size: 200
   max_seq_length: 512
-  clean: false                      
+  clean: false
   tokenizer:
     padding: max_length
     truncation: true
@@ -24,4 +24,4 @@ generation:
   early_stopping: true
 
 output:
-  report_file: evaluation/evaluate_report.json
+  report_file: evaluation/in_dist_report.json
