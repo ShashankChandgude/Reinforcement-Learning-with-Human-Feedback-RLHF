@@ -1,9 +1,8 @@
-# pavement.py
-
 import os
 import shutil
 import glob
 from paver.easy import task, needs, sh
+
 
 def rm_rf(pattern):
     """
@@ -22,7 +21,6 @@ def setup():
     sh("pip install -r requirements.txt")
 
 @task
-@needs('setup')
 def test():
     """Run the pytest test suite."""
     sh("pytest --maxfail=1 --disable-warnings -q")
@@ -38,7 +36,12 @@ def clean():
         rm_rf(pat)
 
 @task
-@needs('test')
 def run():
-    """Train and evaluate the model end-to-end."""
-    sh("./run_all.sh")
+    """Execute the full RLHF pipeline via main.py"""
+    sh("python main.py")
+
+@task
+@needs(['setup', 'clean', 'test', 'run'])
+def default():
+    """Install deps, clean, test, and run the entire pipeline."""
+    pass
