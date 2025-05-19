@@ -1,0 +1,27 @@
+phase: evaluate
+
+model_dir: models/ppo_model
+
+dataset:
+  loader: ood
+  name: allenai/legal-qa            
+  subset_size: 200                  
+  max_seq_length: 512
+  clean: false                      
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+metrics:
+  - bleu
+  - rouge
+  - bertscore
+
+generation:
+  max_length: 128
+  num_beams: 5
+  early_stopping: true
+
+output:
+  report_file: evaluation/evaluate_report.json
