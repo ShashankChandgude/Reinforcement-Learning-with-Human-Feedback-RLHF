@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
 from data.data_loader import load_dataset
-from RewardModel import RewardModel
+from training.reward_model import RewardModel
 from utils.logging_utils import setup_logger
 
 class PPOTrainer:
@@ -26,15 +26,15 @@ class PPOTrainer:
         ds_cfg = config.get("dataset", {})
         self.logger.info(f"Loading dataset with loader: {ds_cfg.get('loader')} name: {ds_cfg.get('name')}")
         dataset = load_dataset(tokenizer=self.tokenizer, dataset_cfg=ds_cfg)
-        bs = config.get("training", {}).get("batch_size", 4)
+        bs = int(config.get("training", {}).get("batch_size", 4))
         self.dataloader = DataLoader(dataset, batch_size=bs, shuffle=True)
 
-        lr = config.get("training", {}).get("learning_rate", 5e-5)
+        lr = float(config.get("training", {}).get("learning_rate", 5e-5))
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
         tcfg = config.get("training", {})
-        self.epochs = tcfg.get("epochs", 3)
-        self.clip_epsilon = tcfg.get("clip_epsilon", 0.2)
-        self.logging_steps = tcfg.get("logging_steps", 50)
+        self.epochs = int(tcfg.get("epochs", 3))
+        self.clip_epsilon = float(tcfg.get("clip_epsilon", 0.2))
+        self.logging_steps = int(tcfg.get("logging_steps", 50))
 
     def train(self):
         self.model.train()

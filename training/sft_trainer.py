@@ -20,16 +20,16 @@ class SFTTrainer:
         ds_cfg = config.get("dataset", {})
         self.logger.info(f"Loading dataset with loader: {ds_cfg.get('loader')} name: {ds_cfg.get('name')}")
         dataset = load_dataset(tokenizer=self.tokenizer, dataset_cfg=ds_cfg)
-        batch_size = config["training"].get("batch_size", 4)
+        batch_size = int(config["training"].get("batch_size", 4))
         self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        lr = config["training"].get("learning_rate", 5e-5)
+        lr = float(config["training"].get("learning_rate", 5e-5))
         params = list(self.model.parameters())
         self.optimizer = torch.optim.AdamW(params, lr=lr) if params else None
 
     def train(self):
-        epochs = self.config["training"].get("epochs", 3)
-        logging_steps = self.config["training"].get("logging_steps", 50)
+        epochs = int(self.config["training"].get("epochs", 3))
+        logging_steps = int(self.config["training"].get("logging_steps", 50))
         self.logger.info(f"Starting SFT training for {epochs} epochs")
         self.model.train()
 

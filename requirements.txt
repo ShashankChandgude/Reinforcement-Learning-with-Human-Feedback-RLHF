@@ -1,7 +1,8 @@
 # Core ML & data
-torch>=2.0.0
+torch>=2.1.0
 transformers>=4.35.0
 datasets>=2.12.0
+numpy<2.0.0
 
 # Evaluation metrics
 sacrebleu>=2.3.1

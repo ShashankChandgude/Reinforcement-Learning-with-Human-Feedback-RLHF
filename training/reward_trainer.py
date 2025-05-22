@@ -5,7 +5,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
 from data.data_loader import load_dataset
-from RewardModel import RewardModel
+from training.reward_model import RewardModel
 from utils.logging_utils import setup_logger
 
 class RewardTrainer:
@@ -24,15 +24,15 @@ class RewardTrainer:
         ds_cfg = config.get("dataset", {})
         self.logger.info(f"Loading dataset with loader: {ds_cfg.get('loader')} name: {ds_cfg.get('name')}")
         dataset = load_dataset(tokenizer=self.tokenizer, dataset_cfg=ds_cfg)
-        batch_size = config["training"].get("batch_size", 4)
+        batch_size = int(config["training"].get("batch_size", 4))
         self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        lr = config["training"].get("learning_rate", 5e-5)
+        lr = float(config["training"].get("learning_rate", 5e-5))
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
 
     def train(self):
-        epochs = self.config["training"].get("epochs", 3)
-        steps = self.config["training"].get("logging_steps", 50)
+        epochs = int(self.config["training"].get("epochs", 3))
+        steps = int(self.config["training"].get("logging_steps", 50))
         self.model.train()
         self.logger.info(f"Training reward model for {epochs} epochs")
         for e in range(1, epochs + 1):

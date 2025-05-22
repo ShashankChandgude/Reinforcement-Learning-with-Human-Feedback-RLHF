@@ -6,7 +6,7 @@ from scripts.run_training import run_training
 
 def main():
     """Run the full RLHF pipeline: SFT, Reward, PPO training and evaluation."""
-    logger = setup_logger(name="pipeline")
+    logger = setup_logger("pipeline")
     logger.info("=== Starting full pipeline ===")
 
     # Training phases
