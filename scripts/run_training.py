@@ -3,11 +3,12 @@
 from utils.config_loader import load_config
 from training.sft_trainer import SFTTrainer
 from training.reward_trainer import RewardTrainer
+from training.preference_reward_trainer import PreferenceRewardTrainer
 from training.ppo_trainer import PPOTrainer
 
 TRAINING_STEPS = [
     ("sft", SFTTrainer, "configs/sft.yaml"),
-    ("reward", RewardTrainer, "configs/reward.yaml"),
+    ("reward_preference", PreferenceRewardTrainer, "configs/reward_preference.yaml"),
     ("ppo", PPOTrainer, "configs/ppo.yaml"),
 ]
 

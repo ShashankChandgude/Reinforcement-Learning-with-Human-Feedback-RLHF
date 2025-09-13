@@ -1,0 +1,22 @@
+# Reward model training with proper preference data
+model: EleutherAI/gpt-neo-125M  # Will upgrade to larger model in Phase 3
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 1000  # Start small for experimentation
+  max_seq_length: 512
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 3
+  batch_size: 4
+  learning_rate: 5e-5
+  logging_steps: 50
+
+output:
+  model_dir: models/reward_model_preference

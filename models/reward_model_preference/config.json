@@ -1,0 +1,24 @@
+{
+  "model": "EleutherAI/gpt-neo-125M",
+  "dataset": {
+    "loader": "preference",
+    "name": "Anthropic/hh-rlhf",
+    "subset_size": 50,
+    "max_seq_length": 512,
+    "clean": true,
+    "tokenizer": {
+      "padding": "max_length",
+      "truncation": true,
+      "return_tensors": "pt"
+    }
+  },
+  "training": {
+    "epochs": 1,
+    "batch_size": 2,
+    "learning_rate": "5e-5",
+    "logging_steps": 10
+  },
+  "output": {
+    "model_dir": "models/reward_model_preference"
+  }
+}
