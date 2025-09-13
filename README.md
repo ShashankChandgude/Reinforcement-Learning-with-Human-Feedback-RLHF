@@ -331,13 +331,6 @@ If you use this implementation in your research, please cite:
 }
 ```
 
----
-
-## 📄 **License**
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
 
 ## 🙏 **Acknowledgements**
 
@@ -347,13 +340,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Microsoft** for LoRA (Low-Rank Adaptation)
 - **PyTorch** team for the deep learning framework
 
----
-
-## 📞 **Support**
-
-- **Issues**: [GitHub Issues](https://github.com/your-username/rlhf-pipeline/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-username/rlhf-pipeline/discussions)
-- **Email**: your.email@domain.com
 
 ---
 

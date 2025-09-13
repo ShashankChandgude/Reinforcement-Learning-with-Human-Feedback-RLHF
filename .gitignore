@@ -41,6 +41,12 @@ htmlcov/
 logs/
 *.log
 
+# Model files and checkpoints
+models/
+*.pth
+*.safetensors
+*.bin
+
 
 # IDEs and editors
 .vscode/

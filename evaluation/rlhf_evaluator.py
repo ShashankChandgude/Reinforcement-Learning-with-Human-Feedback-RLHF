@@ -28,6 +28,9 @@ class RLHFEvaluator:
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
+        # Fix padding side for decoder-only models (important for generation)
+        self.tokenizer.padding_side = 'left'
+        
         # For now, we'll use the base model for generation
         # In a full implementation, we'd load the fine-tuned model
         base_model_name = "EleutherAI/gpt-neo-125M"
@@ -69,9 +72,14 @@ class RLHFEvaluator:
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
                 max_length=max_length,
-                num_beams=1,  # Greedy decoding for consistency
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id
+                temperature=0.8,  # Add randomness for diversity
+                do_sample=True,   # Enable sampling
+                top_p=0.9,        # Nucleus sampling
+                repetition_penalty=1.3,  # Strong anti-repetition
+                no_repeat_ngram_size=3,  # Prevent 3-gram repetition
+                early_stopping=True,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id
             )
         
         # Decode responses
