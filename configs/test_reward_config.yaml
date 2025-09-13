@@ -1,0 +1,22 @@
+# Test configuration for reward model training - very small scale
+model: EleutherAI/gpt-neo-125M
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 20  # Very small for testing
+  max_seq_length: 256
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 1  # Single epoch for testing
+  batch_size: 2
+  learning_rate: 5e-5
+  logging_steps: 5
+
+output:
+  model_dir: models/test_reward_model

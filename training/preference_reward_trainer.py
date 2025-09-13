@@ -27,8 +27,8 @@ class PreferenceRewardTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        base_model = AutoModelForCausalLM.from_pretrained(model_id)
-        self.model = RewardModel(base_model).to(self.device)
+        self.base_model = AutoModelForCausalLM.from_pretrained(model_id)
+        self.model = RewardModel(self.base_model).to(self.device)
         
         # Load preference dataset
         ds_cfg = config.get("dataset", {})
@@ -163,15 +163,18 @@ class PreferenceRewardTrainer:
         output_dir = self.config.get("output", {}).get("model_dir", "models/reward_model_preference")
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save model state dict
+        # Save the base model (needed for AutoModelForCausalLM.from_pretrained)
+        self.base_model.save_pretrained(output_dir)
+        
+        # Save reward model state dict separately
         torch.save(self.model.state_dict(), f"{output_dir}/reward_model.pth")
         
         # Save tokenizer
         self.tokenizer.save_pretrained(output_dir)
         
-        # Save config
+        # Save training config separately
         import json
-        with open(f"{output_dir}/config.json", "w") as f:
+        with open(f"{output_dir}/training_config.json", "w") as f:
             json.dump(self.config, f, indent=2)
         
         self.logger.info(f"Saved preference reward model to {output_dir}")

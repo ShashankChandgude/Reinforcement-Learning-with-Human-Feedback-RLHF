@@ -1,0 +1,36 @@
+# LoRA fine-tuning configuration for 7B model
+model: microsoft/DialoGPT-medium  # Start with medium model, upgrade to 7B later
+use_lora: true
+lora_config:
+  r: 16
+  lora_alpha: 32
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  lora_dropout: 0.1
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 1000  # Increased for better learning
+  max_seq_length: 512
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 3
+  batch_size: 1  # Small batch for memory efficiency
+  learning_rate: 2e-4  # Higher LR for LoRA
+  logging_steps: 10
+  save_steps: 100
+  eval_steps: 50
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  warmup_steps: 50
+
+output:
+  model_dir: models/lora_7b_model
+  log_dir: logs/lora_training

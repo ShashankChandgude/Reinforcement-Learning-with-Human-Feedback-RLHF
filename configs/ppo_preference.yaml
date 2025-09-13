@@ -1,0 +1,27 @@
+# PPO training configuration with preference-based reward model
+model: EleutherAI/gpt-neo-125M
+reward_model_dir: models/reward_model_preference
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 500  # Moderate size for PPO training
+  max_seq_length: 256  # Shorter for faster training
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 2
+  batch_size: 2
+  learning_rate: 1e-5
+  clip_epsilon: 0.2
+  logging_steps: 10
+  save_steps: 50
+  max_grad_norm: 1.0
+
+output:
+  model_dir: models/ppo_preference_model
+  log_dir: logs/ppo_training
