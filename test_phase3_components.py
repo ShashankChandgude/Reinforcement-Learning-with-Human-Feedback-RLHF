@@ -99,7 +99,7 @@ def test_imports():
     
     try:
         # Test LoRA trainer import
-        from training.lora_trainer import LoRATrainer
+        from training.simple_lora_trainer import SimpleLoRATrainer
         logger.info("LoRA trainer import successful")
         
         # Test PPO trainer import

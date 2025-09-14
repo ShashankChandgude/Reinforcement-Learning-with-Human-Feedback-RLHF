@@ -50,6 +50,8 @@ class PreferenceRewardTrainer:
         # Training parameters
         self.epochs = int(config["training"].get("epochs", 3))
         self.logging_steps = int(config["training"].get("logging_steps", 50))
+        # Margin for margin-based preference loss (hinge). 0.0 disables margin.
+        self.margin = float(config["training"].get("margin", 0.0))
         
     def collate_fn(self, batch):
         """Custom collate function for preference data."""
@@ -80,14 +82,17 @@ class PreferenceRewardTrainer:
             Preference loss
         """
         # Bradley-Terry model: P(chosen > rejected) = sigmoid(r_chosen - r_rejected)
-        reward_diff = chosen_rewards - rejected_rewards
-        logits = reward_diff.squeeze(-1)  # [batch_size]
-        
-        # Binary cross-entropy loss where positive class is "chosen is better"
-        # We want to maximize P(chosen > rejected), so target is 1
-        targets = torch.ones_like(logits)
-        loss = F.binary_cross_entropy_with_logits(logits, targets)
-        
+        # With optional margin to enforce a gap between chosen and rejected.
+        reward_diff = (chosen_rewards - rejected_rewards).squeeze(-1)  # [batch_size]
+
+        if self.margin > 0.0:
+            # Margin ranking (hinge) loss: max(0, margin - (r_c - r_r))
+            loss = F.relu(self.margin - reward_diff).mean()
+        else:
+            # Standard BT loss via BCE on the reward difference logits
+            targets = torch.ones_like(reward_diff)
+            loss = F.binary_cross_entropy_with_logits(reward_diff, targets)
+
         return loss
     
     def train_step(self, batch):

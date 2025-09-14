@@ -1,11 +1,18 @@
 """
 Weights & Biases integration for experiment tracking.
+Import is optional; if wandb is not installed, logging is skipped gracefully.
 """
-
-import wandb
 import os
 from typing import Dict, Any, Optional
 from utils.logging_utils import setup_logger
+
+# Try to import wandb; fall back to a stub when unavailable
+try:
+    import wandb  # type: ignore
+    _WANDB_AVAILABLE = True
+except Exception:
+    wandb = None  # type: ignore
+    _WANDB_AVAILABLE = False
 
 
 class WandBLogger:
@@ -19,12 +26,12 @@ class WandBLogger:
     
     def init(self, run_name: Optional[str] = None, tags: Optional[list] = None):
         """Initialize W&B run."""
+        # Check if W&B is available
+        if not self._check_wandb_available():
+            self.logger.warning("W&B not available, skipping initialization")
+            return False
+
         try:
-            # Check if W&B is available
-            if not self._check_wandb_available():
-                self.logger.warning("W&B not available, skipping initialization")
-                return False
-            
             # Initialize run
             wandb.init(
                 project=self.project_name,
@@ -33,11 +40,9 @@ class WandBLogger:
                 tags=tags or [],
                 reinit=True
             )
-            
             self.is_initialized = True
             self.logger.info(f"W&B initialized for project: {self.project_name}")
             return True
-            
         except Exception as e:
             self.logger.error(f"Failed to initialize W&B: {e}")
             return False
@@ -146,19 +151,14 @@ class WandBLogger:
     
     def _check_wandb_available(self) -> bool:
         """Check if W&B is available and configured."""
+        if not _WANDB_AVAILABLE:
+            self.logger.warning("W&B not installed. Install with: pip install wandb")
+            return False
         try:
-            # Check if wandb is installed
-            import wandb
-            
-            # Check if user is logged in
             if not wandb.api.api_key:
                 self.logger.warning("W&B API key not found. Please run 'wandb login'")
                 return False
-            
             return True
-        except ImportError:
-            self.logger.warning("W&B not installed. Install with: pip install wandb")
-            return False
         except Exception as e:
             self.logger.error(f"Error checking W&B availability: {e}")
             return False

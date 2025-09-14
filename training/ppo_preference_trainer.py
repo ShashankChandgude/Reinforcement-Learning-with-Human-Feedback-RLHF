@@ -6,6 +6,7 @@ import os
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from data.data_loader import load_dataset
 from training.reward_model import RewardModel
@@ -30,6 +31,8 @@ class PPOPreferenceTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
+        # Simple value function head on top of policy hidden states (last token)
+        self.value_head = nn.Linear(self.model.config.hidden_size, 1).to(self.device)
         
         # Load reward model
         reward_model_dir = config.get("reward_model_dir")
@@ -69,12 +72,17 @@ class PPOPreferenceTrainer:
         
         # Setup optimizer with explicit type conversion
         lr = float(config["training"]["learning_rate"])
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
+        self.optimizer = torch.optim.AdamW(
+            list(self.model.parameters()) + list(self.value_head.parameters()), lr=lr
+        )
         
         # Training parameters with explicit type conversion
         self.epochs = int(config["training"]["epochs"])
         self.clip_epsilon = float(config["training"]["clip_epsilon"])
         self.logging_steps = int(config["training"]["logging_steps"])
+        self.value_coeff = float(config["training"].get("value_coeff", 0.5))
+        self.gamma = float(config["training"].get("gamma", 0.99))
+        self.gae_lambda = float(config["training"].get("gae_lambda", 0.95))
         self.save_steps = int(config["training"].get("save_steps", 100))
         
         # Tracking
@@ -115,6 +123,28 @@ class PPOPreferenceTrainer:
         with torch.no_grad():
             rewards = self.reward_model(input_ids, attention_mask)
         return rewards
+
+    def compute_values(self, input_ids, attention_mask):
+        """Compute state values from policy hidden states (last token)."""
+        outputs = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True
+        )
+        last_hidden = outputs.hidden_states[-1][:, -1, :]
+        values = self.value_head(last_hidden)
+        return values  # [batch, 1]
+
+    def compute_gae(self, rewards, values):
+        """Compute advantages via 1-step TD or simple baseline if no trajectories.
+
+        Given batch i.i.d. samples, we approximate advantages as r - V(s).
+        """
+        # rewards: [batch], values: [batch, 1]
+        baseline = values.detach().squeeze(-1)
+        advantages = rewards - baseline
+        returns = advantages + baseline  # equals rewards
+        return advantages, returns
     
     def compute_kl_divergence(self, old_log_probs, new_log_probs):
         """Compute KL divergence between old and new policies."""
@@ -153,25 +183,18 @@ class PPOPreferenceTrainer:
         log_probs = F.log_softmax(logits, dim=-1)
         action_log_probs = torch.gather(log_probs, -1, input_ids.unsqueeze(-1)).squeeze(-1)
         
-        # Compute rewards
+        # Compute rewards and values
         rewards = self.compute_reward(input_ids, attention_mask).squeeze(-1)
+        values = self.compute_values(input_ids, attention_mask).squeeze(-1)
+
+        # Compute advantages and returns (baseline with value function)
+        advantages, returns = self.compute_gae(rewards, values.unsqueeze(-1))
         
-        # Compute advantages (fixed version)
-        # Simple but robust advantage computation
-        reward_mean = rewards.mean()
-        
-        # Compute advantages as deviation from mean
-        advantages = rewards - reward_mean
-        
-        # Add small noise to ensure non-zero advantages
-        if torch.abs(advantages).max() < 1e-6:
-            advantages = torch.randn_like(advantages) * 0.1
-        
-        # Normalize advantages to unit variance for stability
+        # Normalize advantages for stability
         if len(advantages) > 1:
             adv_std = advantages.std()
             if adv_std > 1e-6:
-                advantages = advantages / adv_std
+                advantages = (advantages - advantages.mean()) / adv_std
         
         # Handle old log probs for PPO
         batch_key = str(input_ids.shape)  # Simple key based on batch shape
@@ -185,15 +208,19 @@ class PPOPreferenceTrainer:
         # Store current log probs for next iteration
         self.old_log_probs_buffer[batch_key] = action_log_probs.detach()
         
-        # Compute PPO loss
+        # Compute PPO policy loss
         ppo_loss = self.ppo_loss(action_log_probs, old_log_probs, rewards, advantages)
+        # Compute value loss
+        value_loss = F.mse_loss(values, returns)
+        # Total loss
+        total_loss = ppo_loss + self.value_coeff * value_loss
         
         # Compute KL divergence
         kl_div = self.compute_kl_divergence(old_log_probs, action_log_probs)
         
         # Backward pass
         self.optimizer.zero_grad()
-        ppo_loss.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
@@ -211,6 +238,7 @@ class PPOPreferenceTrainer:
         
         return {
             'ppo_losses': ppo_loss.item(),
+            'value_losses': value_loss.item(),
             'rewards': rewards.mean().item(),
             'kl_divergences': kl_div.item(),
             'preference_accuracies': preference_accuracy

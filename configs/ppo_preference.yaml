@@ -21,6 +21,9 @@ training:
   logging_steps: 10
   save_steps: 50
   max_grad_norm: 1.0
+  value_coeff: 0.5
+  gamma: 0.99
+  gae_lambda: 0.95
 
 output:
   model_dir: models/ppo_preference_model

@@ -4,19 +4,19 @@ model: EleutherAI/gpt-neo-125M  # Will upgrade to larger model in Phase 3
 dataset:
   loader: preference
   name: Anthropic/hh-rlhf
-  subset_size: 1000  # Start small for experimentation
-  max_seq_length: 512
+  subset_size: 500  # Phase B: Moderate increase for better learning
+  max_seq_length: 256  # Shorter for faster training
   clean: true
   tokenizer:
     padding: max_length
     truncation: true
-    return_tensors: pt
 
 training:
-  epochs: 3
-  batch_size: 4
-  learning_rate: 5e-5
-  logging_steps: 50
+  epochs: 5  # More epochs for better convergence
+  batch_size: 4  # Larger batch for stability
+  learning_rate: 3e-5  # Slightly lower for stability
+  logging_steps: 25  # More frequent logging
+  margin: 0.5  # Bradley-Terry margin for better separation
 
 output:
   model_dir: models/reward_model_preference

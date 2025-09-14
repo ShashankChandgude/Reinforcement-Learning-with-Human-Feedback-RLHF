@@ -132,33 +132,52 @@ def prepare_hh_rlhf_dataset(
     for example in subset:
         # HH-RLHF has 'chosen' and 'rejected' fields
         if 'chosen' in example and 'rejected' in example:
-            # Split the chosen/rejected into prompt and response
-            chosen_text = example['chosen']
-            rejected_text = example['rejected']
+            chosen_text = example['chosen'].strip()
+            rejected_text = example['rejected'].strip()
             
-            # For HH-RLHF, we need to split on "Human:" and "Assistant:"
-            # This is a simplified approach - in practice, you'd want more robust parsing
-            if "Human:" in chosen_text and "Assistant:" in chosen_text:
-                chosen_parts = chosen_text.split("Assistant:")
-                if len(chosen_parts) >= 2:
-                    prompt = chosen_parts[0].replace("Human:", "").strip()
-                    chosen_response = chosen_parts[1].strip()
+            # For HH-RLHF, extract the FIRST human query and use FULL conversations as responses
+            # The dataset contains full multi-turn conversations
+            
+            # Extract first human prompt - handle the \n\nH: format
+            if 'H:' in chosen_text:
+                # Find first H: occurrence
+                h_start = chosen_text.find('H:')
+                if h_start != -1:
+                    # Extract the line with H:
+                    h_line_start = h_start
+                    h_line_end = chosen_text.find('\n', h_start)
+                    if h_line_end == -1:
+                        h_line_end = len(chosen_text)
+                    
+                    # Get the human prompt
+                    prompt = chosen_text[h_start+2:h_line_end].strip()
+                    
+                    # Get everything after the first H: line as the conversation
+                    chosen_response = chosen_text[h_line_end:].strip()
                 else:
                     continue
             else:
-                # Fallback: use the whole text as response
+                # Fallback for non-standard format
                 prompt = "Continue the conversation:"
                 chosen_response = chosen_text
             
-            if "Human:" in rejected_text and "Assistant:" in rejected_text:
-                rejected_parts = rejected_text.split("Assistant:")
-                if len(rejected_parts) >= 2:
-                    rejected_response = rejected_parts[1].strip()
+            # Extract rejected response (same prompt, different conversation)
+            if 'H:' in rejected_text:
+                h_start = rejected_text.find('H:')
+                if h_start != -1:
+                    h_line_end = rejected_text.find('\n', h_start)
+                    if h_line_end == -1:
+                        h_line_end = len(rejected_text)
+                    rejected_response = rejected_text[h_line_end:].strip()
                 else:
                     continue
             else:
                 rejected_response = rejected_text
             
+            # Skip if responses are identical or empty
+            if chosen_response == rejected_response or not chosen_response or not rejected_response:
+                continue
+                
             prompts.append(prompt)
             chosen_responses.append(chosen_response)
             rejected_responses.append(rejected_response)
