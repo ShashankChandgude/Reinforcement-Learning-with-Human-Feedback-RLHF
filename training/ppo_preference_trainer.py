@@ -81,6 +81,7 @@ class PPOPreferenceTrainer:
         self.clip_epsilon = float(config["training"]["clip_epsilon"])
         self.logging_steps = int(config["training"]["logging_steps"])
         self.value_coeff = float(config["training"].get("value_coeff", 0.5))
+        self.entropy_coeff = float(config["training"].get("entropy_coeff", 0.01))
         self.gamma = float(config["training"].get("gamma", 0.99))
         self.gae_lambda = float(config["training"].get("gae_lambda", 0.95))
         self.save_steps = int(config["training"].get("save_steps", 100))
@@ -88,8 +89,14 @@ class PPOPreferenceTrainer:
         # Tracking
         self.training_history = {
             "ppo_losses": [],
+            "value_losses": [],
+            "total_losses": [],
             "rewards": [],
+            "values": [],
+            "advantages": [],
             "kl_divergences": [],
+            "entropy": [],
+            "grad_norm": [],
             "preference_accuracies": []
         }
         
@@ -135,112 +142,194 @@ class PPOPreferenceTrainer:
         values = self.value_head(last_hidden)
         return values  # [batch, 1]
 
-    def compute_gae(self, rewards, values):
-        """Compute advantages via 1-step TD or simple baseline if no trajectories.
-
-        Given batch i.i.d. samples, we approximate advantages as r - V(s).
+    def compute_gae(self, rewards, values, next_values=None):
         """
-        # rewards: [batch], values: [batch, 1]
-        baseline = values.detach().squeeze(-1)
-        advantages = rewards - baseline
-        returns = advantages + baseline  # equals rewards
+        Compute Generalized Advantage Estimation (GAE).
+        
+        For single-step episodes (i.i.d. samples), we use:
+        - delta = reward - value (TD error)
+        - advantage = delta (no trajectory to bootstrap)
+        - return = reward (target for value function)
+        
+        Args:
+            rewards: [batch_size] - immediate rewards
+            values: [batch_size] - current state values
+            next_values: [batch_size] - next state values (None for terminal states)
+        """
+        rewards = rewards.detach()
+        values = values.detach().squeeze(-1) if values.dim() > 1 else values.detach()
+        
+        # For i.i.d. samples, we treat each as a terminal state
+        # TD error: δ = r + γ * V(s') - V(s), but V(s') = 0 for terminal states
+        td_errors = rewards - values
+        
+        # For GAE with terminal states: A = δ (no future states to consider)
+        advantages = td_errors
+        
+        # Returns are the targets for value function training
+        returns = rewards  # For terminal states, return = reward
+        
         return advantages, returns
     
     def compute_kl_divergence(self, old_log_probs, new_log_probs):
         """Compute KL divergence between old and new policies."""
         return (old_log_probs - new_log_probs).mean()
     
-    def ppo_loss(self, log_probs, old_log_probs, rewards, advantages):
-        """Compute PPO loss (simplified and robust)."""
-        # Compute log probability ratio
-        log_ratio = log_probs - old_log_probs
-        ratio = torch.exp(torch.clamp(log_ratio, -5, 5))  # Clamp to prevent overflow
+    def ppo_loss(self, log_probs, old_log_probs, advantages, entropy=None):
+        """
+        Compute PPO loss with clipped surrogate objective and optional entropy regularization.
         
-        # PPO clipped objective
+        Args:
+            log_probs: [batch_size] - current policy log probabilities
+            old_log_probs: [batch_size] - old policy log probabilities  
+            advantages: [batch_size] - advantage estimates
+            entropy: [batch_size] - entropy of current policy (optional)
+        """
+        # Ensure all tensors are properly shaped and detached where needed
+        log_probs = log_probs.squeeze() if log_probs.dim() > 1 else log_probs
+        old_log_probs = old_log_probs.squeeze() if old_log_probs.dim() > 1 else old_log_probs
+        advantages = advantages.detach()  # Don't backprop through advantages
+        
+        # Compute importance sampling ratio
+        log_ratio = log_probs - old_log_probs
+        ratio = torch.exp(torch.clamp(log_ratio, -10, 10))  # Prevent extreme ratios
+        
+        # PPO clipped surrogate objective
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
         
-        # Compute policy loss
+        # Compute surrogate losses
         surrogate1 = ratio * advantages
         surrogate2 = clipped_ratio * advantages
+        
+        # Take minimum (most conservative estimate)
         policy_loss = -torch.min(surrogate1, surrogate2).mean()
         
-        # Handle NaN/inf values
+        # Add entropy regularization if provided
+        entropy_coeff = getattr(self, 'entropy_coeff', 0.01)
+        if entropy is not None and entropy_coeff > 0:
+            entropy_loss = -entropy_coeff * entropy.mean()
+            policy_loss = policy_loss + entropy_loss
+        
+        # Robust handling of numerical issues
         if torch.isnan(policy_loss) or torch.isinf(policy_loss):
+            self.logger.warning("NaN/Inf detected in policy loss, using fallback")
             policy_loss = torch.tensor(0.01, requires_grad=True, device=policy_loss.device)
         
         return policy_loss
     
+    def compute_action_log_probs_and_entropy(self, logits, actions):
+        """
+        Compute action log probabilities and entropy from logits.
+        
+        Args:
+            logits: [batch, seq_len, vocab_size] - model logits
+            actions: [batch, seq_len] - selected actions (token ids)
+        
+        Returns:
+            log_probs: [batch] - sum of log probabilities for the sequence
+            entropy: [batch] - entropy of the policy distribution
+        """
+        # Convert logits to log probabilities
+        log_probs_dist = F.log_softmax(logits, dim=-1)  # [batch, seq_len, vocab_size]
+        probs_dist = F.softmax(logits, dim=-1)  # [batch, seq_len, vocab_size]
+        
+        # Get log probabilities for actual actions
+        action_log_probs = torch.gather(log_probs_dist, -1, actions.unsqueeze(-1)).squeeze(-1)  # [batch, seq_len]
+        
+        # Sum over sequence length to get total log probability
+        sequence_log_probs = action_log_probs.sum(dim=-1)  # [batch]
+        
+        # Compute entropy: -sum(p * log(p))
+        entropy = -(probs_dist * log_probs_dist).sum(dim=-1).mean(dim=-1)  # [batch]
+        
+        return sequence_log_probs, entropy
+    
     def train_step(self, batch):
-        """Single PPO training step."""
+        """Single PPO training step with improved computations."""
         input_ids = batch['input_ids'].to(self.device)
         attention_mask = batch['attention_mask'].to(self.device)
         
         # Get current policy outputs
-        outputs = self.model(input_ids, attention_mask=attention_mask, labels=input_ids)
+        outputs = self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
         logits = outputs.logits
         
-        # Compute log probabilities
-        log_probs = F.log_softmax(logits, dim=-1)
-        action_log_probs = torch.gather(log_probs, -1, input_ids.unsqueeze(-1)).squeeze(-1)
+        # Compute action log probabilities and entropy
+        action_log_probs, entropy = self.compute_action_log_probs_and_entropy(logits, input_ids)
         
         # Compute rewards and values
         rewards = self.compute_reward(input_ids, attention_mask).squeeze(-1)
         values = self.compute_values(input_ids, attention_mask).squeeze(-1)
 
-        # Compute advantages and returns (baseline with value function)
-        advantages, returns = self.compute_gae(rewards, values.unsqueeze(-1))
+        # Compute advantages and returns using GAE
+        advantages, returns = self.compute_gae(rewards, values)
         
-        # Normalize advantages for stability
+        # Normalize advantages for stability (important for PPO)
         if len(advantages) > 1:
+            adv_mean = advantages.mean()
             adv_std = advantages.std()
-            if adv_std > 1e-6:
-                advantages = (advantages - advantages.mean()) / adv_std
+            if adv_std > 1e-8:  # Avoid division by zero
+                advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+            else:
+                # If std is too small, just center the advantages
+                advantages = advantages - adv_mean
         
-        # Handle old log probs for PPO
-        batch_key = str(input_ids.shape)  # Simple key based on batch shape
+        # Handle old log probs for PPO (better tracking mechanism)
+        batch_size = input_ids.size(0)
+        seq_len = input_ids.size(1)
+        batch_key = f"{batch_size}x{seq_len}"
+        
         if batch_key in self.old_log_probs_buffer:
-            # Use stored old log probs
             old_log_probs = self.old_log_probs_buffer[batch_key]
+            # Ensure shapes match
+            if old_log_probs.shape != action_log_probs.shape:
+                old_log_probs = action_log_probs.detach() + torch.randn_like(action_log_probs) * 0.01
         else:
             # For first iteration, use slightly perturbed current log probs
             old_log_probs = action_log_probs.detach() + torch.randn_like(action_log_probs) * 0.01
         
         # Store current log probs for next iteration
-        self.old_log_probs_buffer[batch_key] = action_log_probs.detach()
+        self.old_log_probs_buffer[batch_key] = action_log_probs.detach().clone()
         
-        # Compute PPO policy loss
-        ppo_loss = self.ppo_loss(action_log_probs, old_log_probs, rewards, advantages)
-        # Compute value loss
-        value_loss = F.mse_loss(values, returns)
-        # Total loss
-        total_loss = ppo_loss + self.value_coeff * value_loss
+        # Compute PPO policy loss with entropy
+        policy_loss = self.ppo_loss(action_log_probs, old_log_probs, advantages, entropy)
         
-        # Compute KL divergence
+        # Compute value loss (MSE between predicted values and returns)
+        value_loss = F.mse_loss(values, returns.detach())
+        
+        # Total loss with value function coefficient
+        total_loss = policy_loss + self.value_coeff * value_loss
+        
+        # Compute KL divergence for monitoring
         kl_div = self.compute_kl_divergence(old_log_probs, action_log_probs)
         
-        # Backward pass
+        # Backward pass with gradient clipping
         self.optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            list(self.model.parameters()) + list(self.value_head.parameters()), 
+            max_norm=1.0
+        )
         self.optimizer.step()
         
-        # Compute preference accuracy if we have preference data
+        # Compute preference accuracy for monitoring
         preference_accuracy = 0.0
         if 'chosen_texts' in batch and 'rejected_texts' in batch:
-            # Generate responses for chosen and rejected prompts
-            chosen_rewards = self.compute_reward(input_ids, attention_mask)
-            # For rejected, we'd need to generate them, but for simplicity, use current rewards
-            rejected_rewards = chosen_rewards  # Placeholder
-            
-            correct_preferences = (chosen_rewards > rejected_rewards).sum().item()
-            total_preferences = chosen_rewards.size(0)
-            preference_accuracy = correct_preferences / total_preferences if total_preferences > 0 else 0.0
+            # For preference data, we can compute how well rewards align with preferences
+            with torch.no_grad():
+                # This is a simplified metric - in practice you'd want to compare
+                # chosen vs rejected responses properly
+                preference_accuracy = 0.5  # Placeholder
         
         return {
-            'ppo_losses': ppo_loss.item(),
+            'ppo_losses': policy_loss.item(),
             'value_losses': value_loss.item(),
+            'total_losses': total_loss.item(),
             'rewards': rewards.mean().item(),
+            'values': values.mean().item(),
+            'advantages': advantages.mean().item(),
             'kl_divergences': kl_div.item(),
+            'entropy': entropy.mean().item(),
+            'grad_norm': grad_norm.item(),
             'preference_accuracies': preference_accuracy
         }
     
@@ -252,12 +341,7 @@ class PPOPreferenceTrainer:
         global_step = 0
         
         for epoch in range(1, self.epochs + 1):
-            epoch_metrics = {
-                'ppo_losses': [],
-                'rewards': [],
-                'kl_divergences': [],
-                'preference_accuracies': []
-            }
+            epoch_metrics = {key: [] for key in self.training_history.keys()}
             
             for step, batch in enumerate(self.dataloader, start=1):
                 metrics = self.train_step(batch)
@@ -265,19 +349,26 @@ class PPOPreferenceTrainer:
                 
                 # Store metrics
                 for key, value in metrics.items():
-                    epoch_metrics[key].append(value)
-                    self.training_history[key].append(value)
+                    if key in epoch_metrics:
+                        epoch_metrics[key].append(value)
+                        self.training_history[key].append(value)
                 
                 # Logging
                 if step % self.logging_steps == 0:
-                    avg_metrics = {k: sum(v) / len(v) for k, v in epoch_metrics.items()}
-                    self.logger.info(
+                    avg_metrics = {k: sum(v) / len(v) for k, v in epoch_metrics.items() if v}
+                    log_message = (
                         f"Epoch {epoch} | Step {step} | "
-                        f"PPO Loss: {avg_metrics['ppo_losses']:.4f} | "
-                        f"Reward: {avg_metrics['rewards']:.4f} | "
-                        f"KL Div: {avg_metrics['kl_divergences']:.4f} | "
-                        f"Pref Acc: {avg_metrics['preference_accuracies']:.4f}"
+                        f"PPO Loss: {avg_metrics.get('ppo_losses', 0):.4f} | "
+                        f"Value Loss: {avg_metrics.get('value_losses', 0):.4f} | "
+                        f"Total Loss: {avg_metrics.get('total_losses', 0):.4f} | "
+                        f"Reward: {avg_metrics.get('rewards', 0):.4f} | "
+                        f"Value: {avg_metrics.get('values', 0):.4f} | "
+                        f"Advantage: {avg_metrics.get('advantages', 0):.4f} | "
+                        f"KL Div: {avg_metrics.get('kl_divergences', 0):.4f} | "
+                        f"Entropy: {avg_metrics.get('entropy', 0):.4f} | "
+                        f"Grad Norm: {avg_metrics.get('grad_norm', 0):.4f}"
                     )
+                    self.logger.info(log_message)
                 
                 # Save checkpoint
                 if global_step % self.save_steps == 0:
