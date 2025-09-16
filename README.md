@@ -175,7 +175,7 @@ rlhf_ai_ml/
 │   └── wandb_utils.py          # Experiment tracking
 ├── ⚙️ configs/                 # Configuration files
 │   ├── reward_preference.yaml  # Reward model config
-│   ├── lora_7b_config.yaml     # LoRA config
+│   ├── lora_config.yaml        # LoRA config
 │   └── ppo_preference.yaml     # PPO config
 ├── 🏃 run_full_pipeline.py     # Main pipeline runner
 ├── 🧪 test_full_pipeline.py    # Pipeline testing

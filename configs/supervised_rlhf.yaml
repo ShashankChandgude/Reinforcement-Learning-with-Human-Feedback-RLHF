@@ -1,0 +1,36 @@
+# Supervised RLHF Configuration - Stable Alternative to PPO
+# Uses reward model to rank responses and trains on preferred examples
+model: EleutherAI/gpt-neo-125M
+reward_model_dir: models/reward_model_preference_balanced  # Use our excellent reward model
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 500  # Use more data since supervised learning is stable
+  max_seq_length: 224  # Match reward model
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 3  # More epochs since supervised learning is stable
+  batch_size: 2  # Conservative for GTX 1650
+  learning_rate: 2e-5  # Standard fine-tuning rate
+  warmup_steps: 100
+  max_grad_norm: 1.0  # Standard clipping
+  logging_steps: 25
+  save_steps: 250
+  weight_decay: 0.01
+
+optimization:
+  # Conservative settings for GTX 1650
+  mixed_precision: false  # Use fp32 for stability
+  gradient_accumulation_steps: 2  # Effective batch = 4
+  dataloader_num_workers: 0  # Avoid multiprocessing
+  pin_memory: false
+
+output:
+  model_dir: models/supervised_rlhf_model
+  log_dir: logs/supervised_rlhf_training

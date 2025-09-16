@@ -1,0 +1,39 @@
+# Balanced reward model training - Best of both worlds
+# Targets 88-92% accuracy while maintaining GPU efficiency
+model: EleutherAI/gpt-neo-125M
+
+dataset:
+  loader: preference
+  name: anthropic/hh-rlhf
+  subset_size: 300  # Increased from 100, compromise from 500
+  max_seq_length: 224  # Increased from 192, compromise from 256
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+
+training:
+  epochs: 5  # Keep same as both models
+  batch_size: 2  # Increased from 1 for better learning
+  gradient_accumulation_steps: 4  # Reduced from 8, effective batch = 8
+  learning_rate: 3e-5  # Same as both models
+  logging_steps: 15  # More frequent than optimized
+  margin: 0.5
+  # Balanced GPU optimizations
+  mixed_precision: false  # Keep fp32 for GTX 1650 stability
+  dataloader_num_workers: 2  # Parallel data loading
+  pin_memory: true  # Faster transfers
+  use_cache: true  # Enable cache for better efficiency (vs optimized)
+
+optimization:
+  # Reduced memory optimizations for better learning
+  gradient_checkpointing: false  # DISABLED - was hurting accuracy
+  attention_slicing: false  # DISABLED - may fragment patterns
+  # Keep speed optimizations
+  compile_model: false  # Skip compilation overhead
+  use_fast_tokenizer: true
+  # Memory management (lighter than optimized)
+  clear_cache_between_epochs: true  # Only between epochs, not batches
+
+output:
+  model_dir: models/reward_model_preference_balanced

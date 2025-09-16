@@ -37,8 +37,9 @@ env/
 coverage.xml
 htmlcov/
 
-# Logs and output
-logs/
+# Logs and output (keep logs directory but ignore contents)
+logs/*
+!logs/.gitkeep
 *.log
 
 # Model files and checkpoints
@@ -46,6 +47,9 @@ models/
 *.pth
 *.safetensors
 *.bin
+
+# Weights & Biases
+wandb/
 
 
 # IDEs and editors

@@ -130,13 +130,19 @@ class SimpleLoRATrainer:
             gradient_accumulation_steps=int(self.config["training"]["gradient_accumulation_steps"]),
             max_grad_norm=float(self.config["training"]["max_grad_norm"]),
             warmup_steps=int(self.config["training"]["warmup_steps"]),
-            save_total_limit=2,
+            weight_decay=float(self.config["training"].get("weight_decay", 0.0)),
+            lr_scheduler_type=self.config["training"].get("lr_scheduler_type", "linear"),
+            save_total_limit=3,  # Keep more checkpoints for better models
             load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
             eval_strategy="steps",
-            save_strategy="steps",
+            save_strategy="steps", 
             logging_strategy="steps",
             remove_unused_columns=False,
             report_to=None,  # Disable all reporting including W&B
+            dataloader_pin_memory=True,  # Speed optimization
+            fp16=False,  # Keep fp32 for GTX 1650 stability
         )
         
         # Print model parameters

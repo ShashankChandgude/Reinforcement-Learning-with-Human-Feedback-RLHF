@@ -51,6 +51,7 @@ class RLHFEvaluator:
             # Try different possible reward model paths
             reward_model_paths = [
                 f"{self.model_dir}/reward_model.pth",
+                "models/reward_model_preference_balanced/reward_model.pth", 
                 "models/reward_model_preference/reward_model.pth"
             ]
             
@@ -257,28 +258,22 @@ class RLHFEvaluator:
             "rejected_avg_reward": sum(rejected_scores) / len(rejected_scores)
         }
     
-    def evaluate_model_quality(self, 
-                             prompts: List[str], 
-                             references: List[str]) -> Dict[str, float]:
-        """Evaluate basic model quality metrics."""
-        # Generate responses
-        generated_responses = self.generate_responses(prompts)
-        
-        # Compute standard metrics
-        metrics = compute_all(generated_responses, references)
-        
-        # Add response length metrics
-        avg_response_length = sum(len(r.split()) for r in generated_responses) / len(generated_responses)
-        metrics["avg_response_length"] = avg_response_length
-        
-        # Add reward scores if available
+    def evaluate_model_quality(self, prompts: List[str], references: List[str] = None) -> Dict[str, float]:
+        generated = self.generate_responses(prompts)
+        metrics = {}
+
+        if references is not None:
+            metrics.update(compute_all(generated, references))  # BLEU/ROUGE/BERTScore
+        # Always add generic signals
+        metrics["avg_response_length"] = sum(len(r.split()) for r in generated) / max(1, len(generated))
+
         if self.reward_model is not None:
-            reward_scores = self.compute_reward_scores(prompts, generated_responses)
-            metrics["avg_reward_score"] = sum(reward_scores) / len(reward_scores)
-            metrics["reward_std"] = torch.tensor(reward_scores).std().item()
-        
+            reward_scores = self.compute_reward_scores(prompts, generated)
+            metrics["avg_reward_score"] = float(torch.tensor(reward_scores).mean().item())
+            metrics["reward_std"] = float(torch.tensor(reward_scores).std().item())
+
         return metrics
-    
+        
     def compare_models(self, 
                       other_model_dir: str, 
                       prompts: List[str], 

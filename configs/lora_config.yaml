@@ -1,0 +1,37 @@
+# LoRA fine-tuning configuration
+# Optimized for GTX 1650 4GB GPU
+model: EleutherAI/gpt-neo-125M
+use_lora: true
+
+lora_config:
+  r: 16                   # INCREASED rank for more learning capacity
+  lora_alpha: 32          # INCREASED alpha for stronger adaptation  
+  target_modules: ["q_proj", "v_proj", "k_proj", "out_proj"]  # MORE target modules
+  lora_dropout: 0.05      # REDUCED dropout for better learning
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 500        # INCREASED dataset for better learning
+  max_seq_length: 256     # Keep same for memory safety
+  clean: true
+  tokenizer:
+    padding: max_length
+    truncation: true
+
+training:
+  epochs: 5               # INCREASED epochs for better convergence
+  batch_size: 4           # INCREASED batch size (LoRA can handle more)
+  learning_rate: 2e-5     # REDUCED for stability and smooth convergence
+  gradient_accumulation_steps: 2  # REDUCED (effective batch = 8)
+  logging_steps: 5        # MORE frequent logging
+  save_steps: 30          # FIXED: Multiple of eval_steps (30 = 15 * 2)
+  eval_steps: 15          # MORE frequent evaluation
+  max_grad_norm: 0.5      # TIGHTER gradient clipping
+  warmup_steps: 25        # MORE warmup for stability
+  weight_decay: 0.01      # ADD regularization
+  lr_scheduler_type: cosine  # ADD learning rate scheduling
+
+output:
+  model_dir: models/lora_model_improved
+  log_dir: logs/lora_improved

@@ -1,434 +1,730 @@
-"""
-PPO trainer with proper preference-based reward model integration.
-"""
-
-import os
+# training/ppo_preference_trainer.py
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, Iterable
+import math
+import random
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from data.data_loader import load_dataset
-from training.reward_model import RewardModel
-from utils.logging_utils import setup_logger
-from typing import Dict, Any
-import json
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
+
+# ============================= Config =============================
+
+@dataclass
+class PPOConfig:
+    # model
+    model_name: str = "EleutherAI/gpt-neo-125M"
+
+    # generation (prefer YAML.gen; fall back to YAML.training*)
+    max_new_tokens: int = 64
+    temperature: float = 0.7
+    top_p: float = 0.9
+    top_k: int = 0
+    do_sample: bool = True
+
+    # rollout
+    rollout_batch_size: int = 8
+    total_rollouts: int = 64
+
+    # PPO update
+    ppo_epochs: int = 2
+    mini_batch_size: int = 4
+    clip_epsilon: float = 0.1
+    entropy_coeff: float = 0.005
+    value_coeff: float = 0.5
+    max_grad_norm: float = 1.0
+    policy_learning_rate: float = 5e-6
+    value_learning_rate: float = 1e-5
+    gradient_accumulation_steps: int = 1
+
+    # KL control
+    beta_kl: float = 0.02
+    kl_target: float = 0.03
+    adaptive_kl: bool = True
+
+    # advantage/value
+    normalize_advantages: bool = True
+    advantage_clip: float = 5.0
+    value_clip_epsilon: float = 0.2
+
+    # value warmup
+    pretrain_value_steps: int = 10
+    warmup_steps: int = 20  # placeholder for schedulers if you add them
+
+    # runtime / memory
+    logging_steps: int = 10
+    mixed_precision: bool = False  # fp16 autocast on CUDA
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # placement flags (YAML: optimization)
+    policy_on_gpu: bool = True
+    reward_model_on_cpu: bool = True
+    reference_policy_on_cpu: bool = True
+    gradient_checkpointing: bool = False
+
+    # dataset prompt cap (from YAML.dataset.max_seq_length)
+    max_prompt_tokens: int = 128
+
+    # hygiene
+    clear_cache_between_epochs: bool = True
+
+
+def build_config_from_yaml(yaml_cfg: Dict[str, Any]) -> PPOConfig:
+    """Map YAML dict into PPOConfig. Supports both YAML.gen and YAML.training for gen keys."""
+    tr = yaml_cfg.get("training", {}) or {}
+    gen = yaml_cfg.get("gen", {}) or {}
+    ds  = yaml_cfg.get("dataset", {}) or {}
+    opt = yaml_cfg.get("optimization", {}) or {}
+
+    # If gen.* is missing, fall back to training.*
+    g_max_new_tokens = gen.get("max_new_tokens", tr.get("max_new_tokens", 64))
+    g_temperature    = gen.get("temperature",    tr.get("temperature", 0.7))
+    g_top_p          = gen.get("top_p",          tr.get("top_p", 0.9))
+    g_top_k          = gen.get("top_k",          tr.get("top_k", 0))
+    g_do_sample      = gen.get("do_sample",      tr.get("do_sample", True))
+
+    return PPOConfig(
+        model_name=yaml_cfg.get("model", "EleutherAI/gpt-neo-125M"),
+        # generation
+        max_new_tokens=int(g_max_new_tokens),
+        temperature=float(g_temperature),
+        top_p=float(g_top_p),
+        top_k=int(g_top_k),
+        do_sample=bool(g_do_sample),
+        # rollout
+        rollout_batch_size=int(tr.get("rollout_batch_size", 8)),
+        total_rollouts=int(tr.get("total_rollouts", 64)),
+        # PPO
+        ppo_epochs=int(tr.get("ppo_epochs", 2)),
+        mini_batch_size=int(tr.get("mini_batch_size", 4)),
+        clip_epsilon=float(tr.get("clip_epsilon", 0.1)),
+        entropy_coeff=float(tr.get("entropy_coeff", 0.005)),
+        value_coeff=float(tr.get("value_coeff", 0.5)),
+        max_grad_norm=float(tr.get("max_grad_norm", 1.0)),
+        policy_learning_rate=float(tr.get("policy_learning_rate", tr.get("policy_lr", 5e-6))),
+        value_learning_rate=float(tr.get("value_learning_rate", tr.get("value_lr", 1e-5))),
+        gradient_accumulation_steps=int(tr.get("gradient_accumulation_steps", 1)),
+        # KL
+        beta_kl=float(tr.get("beta_kl", 0.02)),
+        kl_target=float(tr.get("kl_target", 0.03)),
+        adaptive_kl=bool(tr.get("adaptive_kl", True)),
+        # advantages / values
+        normalize_advantages=bool(tr.get("normalize_advantages", True)),
+        advantage_clip=float(tr.get("advantage_clip", 5.0)),
+        value_clip_epsilon=float(tr.get("value_clip_epsilon", 0.2)),
+        # warmup
+        pretrain_value_steps=int(tr.get("pretrain_value_steps", 10)),
+        warmup_steps=int(tr.get("warmup_steps", 20)),
+        # misc
+        logging_steps=int(tr.get("logging_steps", 10)),
+        mixed_precision=bool(tr.get("mixed_precision", False)),
+        # optimization
+        policy_on_gpu=bool(opt.get("policy_on_gpu", True)),
+        reward_model_on_cpu=bool(opt.get("reward_model_on_cpu", True)),
+        reference_policy_on_cpu=bool(opt.get("reference_policy_on_cpu", True)),
+        gradient_checkpointing=bool(opt.get("gradient_checkpointing", False)),
+        clear_cache_between_epochs=bool(opt.get("clear_cache_between_epochs", True)),
+        # dataset cap
+        max_prompt_tokens=int(ds.get("max_seq_length", 128)),
+    )
+
+
+# ============================= Trainer =============================
 
 class PPOPreferenceTrainer:
-    """PPO trainer that uses preference-based reward model."""
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.logger = setup_logger("ppo_preference")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Load base model
-        model_name = config["model"]
-        self.logger.info(f"Loading base model: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if not self.tokenizer.pad_token:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
-        # Simple value function head on top of policy hidden states (last token)
-        self.value_head = nn.Linear(self.model.config.hidden_size, 1).to(self.device)
-        
-        # Load reward model
-        reward_model_dir = config.get("reward_model_dir")
-        if reward_model_dir and os.path.exists(reward_model_dir):
-            self.logger.info(f"Loading reward model from: {reward_model_dir}")
-            base_rm = AutoModelForCausalLM.from_pretrained(reward_model_dir)
-            self.reward_model = RewardModel(base_rm).to(self.device)
-            
-            # Load reward model weights
-            reward_weights_path = f"{reward_model_dir}/reward_model.pth"
-            if os.path.exists(reward_weights_path):
-                reward_state = torch.load(reward_weights_path, map_location=self.device)
-                self.reward_model.load_state_dict(reward_state)
-                self.logger.info("Reward model weights loaded")
+    """
+    PPO for RLHF (bandit-style):
+      • On-policy rollouts from current policy
+      • Token-level KL(p‖q) vs frozen reference policy (non-negative)
+      • Reward from external reward model on full sequence
+      • Value at prompt state (last prompt token), no lm_head to save VRAM
+      • Response-only losses with EOS-aware slicing
+    """
+
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer,
+        reward_model: nn.Module,
+        prompts_dataset: Any,  # .prompts or iterable of dicts with "prompt"
+        config: PPOConfig,
+    ):
+        self.cfg = config
+        self.tokenizer = tokenizer
+
+        # Devices
+        self.policy_device = "cuda" if (self.cfg.policy_on_gpu and torch.cuda.is_available()) else "cpu"
+        self.ref_device = "cpu" if self.cfg.reference_policy_on_cpu else self.policy_device
+        self.rm_device = "cpu" if self.cfg.reward_model_on_cpu else self.policy_device
+
+        # Policy (trainable)
+        self.model = AutoModelForCausalLM.from_pretrained(self.cfg.model_name)
+        self.model.config.use_cache = False  # training + memory
+        self.model.to(self.policy_device)
+
+        # Gradient checkpointing (disabled by default on 4GB)
+        if self.cfg.gradient_checkpointing:
+            try:
+                self.model.gradient_checkpointing_enable()
+            except Exception:
+                pass
+
+        # Reference (frozen)
+        self.ref_model = AutoModelForCausalLM.from_pretrained(self.cfg.model_name)
+        self.ref_model.eval()
+        for p in self.ref_model.parameters():
+            p.requires_grad = False
+        self.ref_model.to(self.ref_device)
+
+        # Value head on top of hidden states
+        hidden_size = self.model.config.hidden_size
+        self.value_head = nn.Linear(hidden_size, 1).to(self.policy_device)
+
+        # Optimizers
+        self.policy_optim = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.policy_learning_rate)
+        self.value_optim = torch.optim.AdamW(self.value_head.parameters(), lr=self.cfg.value_learning_rate)
+
+        # Reward model (frozen)
+        self.reward_model = reward_model.eval()
+        for p in self.reward_model.parameters():
+            p.requires_grad = False
+        self.reward_model.to(self.rm_device)
+
+        # Data
+        self.prompts_dataset = prompts_dataset
+
+        # Generation config (force use_cache=False to curb KV memory)
+        self.gen_cfg = GenerationConfig(
+            max_new_tokens=self.cfg.max_new_tokens,
+            do_sample=self.cfg.do_sample,
+            temperature=self.cfg.temperature,
+            top_p=self.cfg.top_p,
+            top_k=self.cfg.top_k,
+            pad_token_id=(self.tokenizer.pad_token_id or self.tokenizer.eos_token_id),
+            eos_token_id=self.tokenizer.eos_token_id,
+            use_cache=False,
+        )
+
+        # AMP (optional)
+        self._amp_dtype = torch.float16 if (self.cfg.mixed_precision and torch.cuda.is_available()) else None
+        self._amp_enabled = self._amp_dtype is not None
+
+        self.global_step = 0
+        self.training_history: List[Dict] = []
+
+    # ------------------------ Tokenization / Generation ------------------------
+
+    def _batch_tokenize_prompts(self, prompts: List[str]) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
+        enc = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.cfg.max_prompt_tokens,  # enforce prompt cap
+        )
+        ids = enc["input_ids"].to(self.policy_device)
+        attn = enc["attention_mask"].to(self.policy_device)
+        lens = attn.sum(dim=1).tolist()
+        return ids, attn, lens
+
+    @torch.no_grad()
+    def _generate(self, prompt_ids: torch.Tensor, prompt_mask: torch.Tensor) -> torch.Tensor:
+        # Seatbelt: force at least a few response tokens to avoid empty slices
+        min_new = max(4, int(self.cfg.max_new_tokens // 8))
+        out = self.model.generate(
+            input_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            generation_config=self.gen_cfg,
+            do_sample=True,  # enforce sampling
+            temperature=max(0.7, float(self.cfg.temperature)),
+            min_new_tokens=min_new,
+        )
+        return out
+
+    # ------------------------ EOS-aware response slicing ------------------------
+
+    def _slice_resp_from_logits(self, logits: torch.Tensor, tokens: torch.Tensor, prompt_len: int):
+        """
+        Align logits (for x[:, :-1]) with targets (x[:, 1:]) and slice response:
+           start at prompt_len - 1 in logits, and prompt_len in tokens.
+        Returns (resp_logits, resp_tokens) with equal time length, trimmed at first EOS per sample.
+        """
+        start_log = max(prompt_len - 1, 0)
+        resp_logits = logits[:, start_log:, :]   # [B, L_log, V]
+        resp_tokens = tokens[:, prompt_len:]     # [B, L_tgt]
+        L = min(resp_logits.size(1), resp_tokens.size(1))
+        if L <= 0:
+            return None, None
+        resp_logits = resp_logits[:, :L, :]
+        resp_tokens = resp_tokens[:, :L]
+
+        # Trim at first EOS in each sample (optional but stabilizing)
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is not None and resp_tokens.numel() > 0:
+            keep = []
+            for i in range(resp_tokens.size(0)):
+                row = resp_tokens[i]
+                idx = (row == eos_id).nonzero(as_tuple=False)
+                cut = int(idx[0].item()) if idx.numel() > 0 else row.size(0)
+                keep.append(cut)
+            trimmed_tokens = []
+            trimmed_logits = []
+            for i in range(resp_tokens.size(0)):
+                cut = keep[i]
+                if cut == 0:
+                    continue
+                trimmed_tokens.append(resp_tokens[i, :cut])
+                trimmed_logits.append(resp_logits[i, :cut, :])
+            if not trimmed_tokens:
+                return None, None
+            resp_tokens = torch.stack(trimmed_tokens, dim=0)
+            resp_logits = torch.stack(trimmed_logits, dim=0)
+
+        return resp_logits, resp_tokens
+
+    # ------------------------ Logprob / KL / Value / Reward ------------------------
+
+    @torch.no_grad()
+    def _resp_logprob_mean(self, full_ids: torch.Tensor, prompt_len: int) -> torch.Tensor:
+        """Mean per-token log-prob of the sampled response under current policy."""
+        x = full_ids.to(self.policy_device)
+        with torch.autocast(device_type="cuda", dtype=self._amp_dtype) if self._amp_enabled else _nullctx():
+            logits = self.model(x[:, :-1]).logits  # [B, T-1, V]
+        out = self._slice_resp_from_logits(logits, x, prompt_len)
+        if out is None:
+            return torch.zeros(x.size(0), device=self.policy_device)
+        resp_logits, resp_tokens = out
+        if resp_logits is None or resp_tokens is None or resp_tokens.size(1) == 0:
+            return torch.zeros(x.size(0), device=self.policy_device)
+        logp = torch.log_softmax(resp_logits, dim=-1)
+        tok_lp = torch.gather(logp, -1, resp_tokens.unsqueeze(-1)).squeeze(-1)  # [B, L]
+        return tok_lp.mean(dim=-1)  # [B]
+
+    @torch.no_grad()
+    def _resp_token_kl_mean(self, full_ids: torch.Tensor, prompt_len: int) -> torch.Tensor:
+        """Token-level KL(p‖q) averaged over response tokens (non-negative)."""
+        x_p = full_ids.to(self.policy_device)
+        x_q = full_ids.to(self.ref_device)
+        with torch.autocast(device_type="cuda", dtype=self._amp_dtype) if self._amp_enabled else _nullctx():
+            logits_p = self.model(x_p[:, :-1]).logits
+        logits_q = self.ref_model(x_q[:, :-1]).logits  # ref on CPU by default
+        out_p = self._slice_resp_from_logits(logits_p, x_p, prompt_len)
+        out_q = self._slice_resp_from_logits(logits_q, x_q, prompt_len)
+        if (out_p is None) or (out_q is None):
+            return torch.zeros(x_p.size(0), device=self.policy_device)
+        resp_logits_p, _ = out_p
+        resp_logits_q, _ = out_q
+        if (resp_logits_p is None) or (resp_logits_q is None) or (resp_logits_p.size(1) == 0):
+            return torch.zeros(x_p.size(0), device=self.policy_device)
+        resp_logits_q = resp_logits_q.to(self.policy_device)
+
+        logp = torch.log_softmax(resp_logits_p, dim=-1)
+        logq = torch.log_softmax(resp_logits_q, dim=-1)
+        p = torch.exp(logp)
+        kl_tok = (p * (logp - logq)).sum(dim=-1)  # [B, L]
+        return kl_tok.mean(dim=-1)                # [B]
+
+    def _prompt_value(self, full_ids: torch.Tensor, prompt_len: int) -> torch.Tensor:
+        """Value at the last prompt token state; avoid lm_head to save VRAM."""
+        # Ensure inputs are regular autograd tensors (not 'inference' tensors)
+        full_ids = full_ids.clone()
+
+        pad = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        attn = (full_ids != pad).long().to(self.policy_device)
+
+        # Call backbone directly if available to skip vocab projection
+        backbone = getattr(self.model, "transformer", None) or getattr(self.model, "model", None)
+        with torch.autocast(device_type="cuda", dtype=self._amp_dtype) if self._amp_enabled else _nullctx():
+            if backbone is not None:
+                outputs = backbone(input_ids=full_ids.to(self.policy_device),
+                                   attention_mask=attn,
+                                   output_hidden_states=True,
+                                   use_cache=False)
+                last_h = getattr(outputs, "last_hidden_state", None)
+                if last_h is None:
+                    last_h = outputs.hidden_states[-1]
             else:
-                self.logger.warning("Reward model weights not found, using untrained model")
-        else:
-            self.logger.warning("No reward model directory specified, using untrained model")
-            base_rm = AutoModelForCausalLM.from_pretrained(model_name)
-            self.reward_model = RewardModel(base_rm).to(self.device)
-        
-        self.reward_model.eval()
-        
-        # Load dataset
-        ds_cfg = config.get("dataset", {})
-        self.logger.info(f"Loading dataset: {ds_cfg.get('name')}")
-        self.dataset = load_dataset(tokenizer=self.tokenizer, dataset_cfg=ds_cfg)
-        
-        # Setup DataLoader with explicit type conversion
-        batch_size = int(config["training"]["batch_size"])
-        self.dataloader = DataLoader(
-            self.dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            collate_fn=self.collate_fn
-        )
-        
-        # Setup optimizer with explicit type conversion
-        lr = float(config["training"]["learning_rate"])
-        self.optimizer = torch.optim.AdamW(
-            list(self.model.parameters()) + list(self.value_head.parameters()), lr=lr
-        )
-        
-        # Training parameters with explicit type conversion
-        self.epochs = int(config["training"]["epochs"])
-        self.clip_epsilon = float(config["training"]["clip_epsilon"])
-        self.logging_steps = int(config["training"]["logging_steps"])
-        self.value_coeff = float(config["training"].get("value_coeff", 0.5))
-        self.entropy_coeff = float(config["training"].get("entropy_coeff", 0.01))
-        self.gamma = float(config["training"].get("gamma", 0.99))
-        self.gae_lambda = float(config["training"].get("gae_lambda", 0.95))
-        self.save_steps = int(config["training"].get("save_steps", 100))
-        
-        # Tracking
-        self.training_history = {
-            "ppo_losses": [],
-            "value_losses": [],
-            "total_losses": [],
-            "rewards": [],
-            "values": [],
-            "advantages": [],
-            "kl_divergences": [],
-            "entropy": [],
-            "grad_norm": [],
-            "preference_accuracies": []
-        }
-        
-        # PPO-specific tracking
-        self.old_log_probs_buffer = {}  # Store old log probs for PPO
-    
-    def collate_fn(self, batch):
-        """Custom collate function for preference data."""
-        if 'chosen_input_ids' in batch[0]:
-            # Preference data
-            chosen_input_ids = torch.stack([item['chosen_input_ids'] for item in batch])
-            chosen_attention_mask = torch.stack([item['chosen_attention_mask'] for item in batch])
-            return {
-                'input_ids': chosen_input_ids,
-                'attention_mask': chosen_attention_mask,
-                'prompts': [item['prompt'] for item in batch],
-                'chosen_texts': [item['chosen_text'] for item in batch],
-                'rejected_texts': [item['rejected_text'] for item in batch]
-            }
-        else:
-            # Regular data
-            input_ids = torch.stack([item['input_ids'] for item in batch])
-            attention_mask = torch.stack([item['attention_mask'] for item in batch])
-            return {
-                'input_ids': input_ids,
-                'attention_mask': attention_mask
-            }
-    
-    def compute_reward(self, input_ids, attention_mask):
-        """Compute reward using the reward model."""
-        with torch.no_grad():
-            rewards = self.reward_model(input_ids, attention_mask)
-        return rewards
+                outputs = self.model(full_ids.to(self.policy_device),
+                                     attention_mask=attn,
+                                     output_hidden_states=True,
+                                     use_cache=False)
+                last_h = outputs.hidden_states[-1]
 
-    def compute_values(self, input_ids, attention_mask):
-        """Compute state values from policy hidden states (last token)."""
-        outputs = self.model(
-            input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True
-        )
-        last_hidden = outputs.hidden_states[-1][:, -1, :]
-        values = self.value_head(last_hidden)
-        return values  # [batch, 1]
+        idx = max(prompt_len - 1, 0)
+        state = last_h[:, idx, :]  # [B, H]
+        return self.value_head(state).squeeze(-1)  # [B]
 
-    def compute_gae(self, rewards, values, next_values=None):
-        """
-        Compute Generalized Advantage Estimation (GAE).
-        
-        For single-step episodes (i.i.d. samples), we use:
-        - delta = reward - value (TD error)
-        - advantage = delta (no trajectory to bootstrap)
-        - return = reward (target for value function)
-        
-        Args:
-            rewards: [batch_size] - immediate rewards
-            values: [batch_size] - current state values
-            next_values: [batch_size] - next state values (None for terminal states)
-        """
-        rewards = rewards.detach()
-        values = values.detach().squeeze(-1) if values.dim() > 1 else values.detach()
-        
-        # For i.i.d. samples, we treat each as a terminal state
-        # TD error: δ = r + γ * V(s') - V(s), but V(s') = 0 for terminal states
-        td_errors = rewards - values
-        
-        # For GAE with terminal states: A = δ (no future states to consider)
-        advantages = td_errors
-        
-        # Returns are the targets for value function training
-        returns = rewards  # For terminal states, return = reward
-        
-        return advantages, returns
-    
-    def compute_kl_divergence(self, old_log_probs, new_log_probs):
-        """Compute KL divergence between old and new policies."""
-        return (old_log_probs - new_log_probs).mean()
-    
-    def ppo_loss(self, log_probs, old_log_probs, advantages, entropy=None):
-        """
-        Compute PPO loss with clipped surrogate objective and optional entropy regularization.
-        
-        Args:
-            log_probs: [batch_size] - current policy log probabilities
-            old_log_probs: [batch_size] - old policy log probabilities  
-            advantages: [batch_size] - advantage estimates
-            entropy: [batch_size] - entropy of current policy (optional)
-        """
-        # Ensure all tensors are properly shaped and detached where needed
-        log_probs = log_probs.squeeze() if log_probs.dim() > 1 else log_probs
-        old_log_probs = old_log_probs.squeeze() if old_log_probs.dim() > 1 else old_log_probs
-        advantages = advantages.detach()  # Don't backprop through advantages
-        
-        # Compute importance sampling ratio
-        log_ratio = log_probs - old_log_probs
-        ratio = torch.exp(torch.clamp(log_ratio, -10, 10))  # Prevent extreme ratios
-        
-        # PPO clipped surrogate objective
-        clipped_ratio = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
-        
-        # Compute surrogate losses
-        surrogate1 = ratio * advantages
-        surrogate2 = clipped_ratio * advantages
-        
-        # Take minimum (most conservative estimate)
-        policy_loss = -torch.min(surrogate1, surrogate2).mean()
-        
-        # Add entropy regularization if provided
-        entropy_coeff = getattr(self, 'entropy_coeff', 0.01)
-        if entropy is not None and entropy_coeff > 0:
-            entropy_loss = -entropy_coeff * entropy.mean()
-            policy_loss = policy_loss + entropy_loss
-        
-        # Robust handling of numerical issues
-        if torch.isnan(policy_loss) or torch.isinf(policy_loss):
-            self.logger.warning("NaN/Inf detected in policy loss, using fallback")
-            policy_loss = torch.tensor(0.01, requires_grad=True, device=policy_loss.device)
-        
-        return policy_loss
-    
-    def compute_action_log_probs_and_entropy(self, logits, actions):
-        """
-        Compute action log probabilities and entropy from logits.
-        
-        Args:
-            logits: [batch, seq_len, vocab_size] - model logits
-            actions: [batch, seq_len] - selected actions (token ids)
-        
-        Returns:
-            log_probs: [batch] - sum of log probabilities for the sequence
-            entropy: [batch] - entropy of the policy distribution
-        """
-        # Convert logits to log probabilities
-        log_probs_dist = F.log_softmax(logits, dim=-1)  # [batch, seq_len, vocab_size]
-        probs_dist = F.softmax(logits, dim=-1)  # [batch, seq_len, vocab_size]
-        
-        # Get log probabilities for actual actions
-        action_log_probs = torch.gather(log_probs_dist, -1, actions.unsqueeze(-1)).squeeze(-1)  # [batch, seq_len]
-        
-        # Sum over sequence length to get total log probability
-        sequence_log_probs = action_log_probs.sum(dim=-1)  # [batch]
-        
-        # Compute entropy: -sum(p * log(p))
-        entropy = -(probs_dist * log_probs_dist).sum(dim=-1).mean(dim=-1)  # [batch]
-        
-        return sequence_log_probs, entropy
-    
-    def train_step(self, batch):
-        """Single PPO training step with improved computations."""
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
-        
-        # Get current policy outputs
-        outputs = self.model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        logits = outputs.logits
-        
-        # Compute action log probabilities and entropy
-        action_log_probs, entropy = self.compute_action_log_probs_and_entropy(logits, input_ids)
-        
-        # Compute rewards and values
-        rewards = self.compute_reward(input_ids, attention_mask).squeeze(-1)
-        values = self.compute_values(input_ids, attention_mask).squeeze(-1)
+    @torch.no_grad()
+    def _sequence_reward(self, full_ids: torch.Tensor) -> torch.Tensor:
+        """Reward from RewardModel over the full sequence."""
+        pad = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        attn = (full_ids != pad).long().to(self.rm_device)
+        out = self.reward_model(input_ids=full_ids.to(self.rm_device), attention_mask=attn)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        return out.squeeze(-1).to(self.policy_device).float()  # [B]
 
-        # Compute advantages and returns using GAE
-        advantages, returns = self.compute_gae(rewards, values)
-        
-        # Normalize advantages for stability (important for PPO)
-        if len(advantages) > 1:
-            adv_mean = advantages.mean()
-            adv_std = advantages.std()
-            if adv_std > 1e-8:  # Avoid division by zero
-                advantages = (advantages - adv_mean) / (adv_std + 1e-8)
-            else:
-                # If std is too small, just center the advantages
-                advantages = advantages - adv_mean
-        
-        # Handle old log probs for PPO (better tracking mechanism)
-        batch_size = input_ids.size(0)
-        seq_len = input_ids.size(1)
-        batch_key = f"{batch_size}x{seq_len}"
-        
-        if batch_key in self.old_log_probs_buffer:
-            old_log_probs = self.old_log_probs_buffer[batch_key]
-            # Ensure shapes match
-            if old_log_probs.shape != action_log_probs.shape:
-                old_log_probs = action_log_probs.detach() + torch.randn_like(action_log_probs) * 0.01
-        else:
-            # For first iteration, use slightly perturbed current log probs
-            old_log_probs = action_log_probs.detach() + torch.randn_like(action_log_probs) * 0.01
-        
-        # Store current log probs for next iteration
-        self.old_log_probs_buffer[batch_key] = action_log_probs.detach().clone()
-        
-        # Compute PPO policy loss with entropy
-        policy_loss = self.ppo_loss(action_log_probs, old_log_probs, advantages, entropy)
-        
-        # Compute value loss (MSE between predicted values and returns)
-        value_loss = F.mse_loss(values, returns.detach())
-        
-        # Total loss with value function coefficient
-        total_loss = policy_loss + self.value_coeff * value_loss
-        
-        # Compute KL divergence for monitoring
-        kl_div = self.compute_kl_divergence(old_log_probs, action_log_probs)
-        
-        # Backward pass with gradient clipping
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            list(self.model.parameters()) + list(self.value_head.parameters()), 
-            max_norm=1.0
-        )
-        self.optimizer.step()
-        
-        # Compute preference accuracy for monitoring
-        preference_accuracy = 0.0
-        if 'chosen_texts' in batch and 'rejected_texts' in batch:
-            # For preference data, we can compute how well rewards align with preferences
+    # ------------------------ Rollouts ------------------------
+
+    def _collect_one_batch(self, prompts: List[str]) -> Dict[str, torch.Tensor]:
+        """Collect one on-policy rollout batch for PPO."""
+        ids, mask, lens = self._batch_tokenize_prompts(prompts)
+
+        # generation can be heavy; keep inference_mode and free cache
+        with torch.inference_mode():
+            gen_ids = self._generate(ids, mask)  # [B, T]
+        # Turn 'inference tensors' into normal autograd-friendly tensors
+        gen_ids = gen_ids.clone().detach()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        B = gen_ids.size(0)
+        old_logprobs, kls, values, rewards = [], [], [], []
+        kept_full_ids, kept_lens = [], []
+
+        for i in range(B):
+            pl = int(lens[i])
+            # quick response-length heuristic; ensure positive length
+            resp_len_est = max(0, gen_ids.size(1) - (pl + 1))
+            if resp_len_est <= 0:
+                continue
+
+            seq = gen_ids[i : i + 1]  # [1, T]
+
+            lp = self._resp_logprob_mean(seq, pl)     # [1]
+            kl = self._resp_token_kl_mean(seq, pl)    # [1]
+
+            # rollout-time value doesn't need grads; avoid "inference tensor" autograd error
             with torch.no_grad():
-                # This is a simplified metric - in practice you'd want to compare
-                # chosen vs rejected responses properly
-                preference_accuracy = 0.5  # Placeholder
-        
+                v = self._prompt_value(seq, pl)       # [1]
+            v = v.detach()
+
+            r  = self._sequence_reward(seq)           # [1]
+
+            # If slicing failed inside helpers (returned zeros) we still keep the sample;
+            # the guards prevent None -> log_softmax(None) crashes.
+
+            kept_full_ids.append(seq.squeeze(0))
+            kept_lens.append(pl)
+            old_logprobs.append(lp.squeeze(0).to("cpu"))
+            kls.append(kl.squeeze(0).to("cpu"))
+            values.append(v.squeeze(0).to("cpu"))
+            rewards.append(r.squeeze(0).to("cpu"))
+
+        # If nothing valid, return empty tensors
+        if len(kept_full_ids) == 0:
+            return {
+                "full_ids": torch.empty(0, 1, dtype=torch.long, device=self.policy_device),
+                "prompt_lens": torch.empty(0, dtype=torch.long, device=self.policy_device),
+                "old_logprobs": torch.empty(0, device=self.policy_device),
+                "kls": torch.empty(0, device=self.policy_device),
+                "values": torch.empty(0, device=self.policy_device),
+                "rewards": torch.empty(0, device=self.policy_device),
+            }
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return {
-            'ppo_losses': policy_loss.item(),
-            'value_losses': value_loss.item(),
-            'total_losses': total_loss.item(),
-            'rewards': rewards.mean().item(),
-            'values': values.mean().item(),
-            'advantages': advantages.mean().item(),
-            'kl_divergences': kl_div.item(),
-            'entropy': entropy.mean().item(),
-            'grad_norm': grad_norm.item(),
-            'preference_accuracies': preference_accuracy
+            "full_ids": torch.stack(kept_full_ids, dim=0).to(self.policy_device),    # [Bv, T]
+            "prompt_lens": torch.tensor(kept_lens, device=self.policy_device, dtype=torch.long),
+            "old_logprobs": torch.stack(old_logprobs, dim=0).to(self.policy_device),  # [Bv]
+            "kls": torch.stack(kls, dim=0).to(self.policy_device),                    # [Bv]
+            "values": torch.stack(values, dim=0).to(self.policy_device),              # [Bv]
+            "rewards": torch.stack(rewards, dim=0).to(self.policy_device),            # [Bv]
         }
-    
-    def train(self):
-        """Train the model with PPO."""
+
+    def collect_rollouts(self, iterator: Iterable[List[str]], cap: int) -> Dict[str, torch.Tensor]:
+        """Accumulate rollout batches until we reach `cap` samples."""
+        bufs = []
+        n = 0
+        for prompts in iterator:
+            buf = self._collect_one_batch(prompts)
+            if buf["full_ids"].numel() == 0:
+                # skip empty collection
+                continue
+            bufs.append(buf)
+            n += buf["full_ids"].size(0)
+            if n >= cap:
+                break
+        if not bufs:
+            # return a fully empty buffer
+            device = self.policy_device
+            return {
+                "full_ids": torch.empty(0, 1, dtype=torch.long, device=device),
+                "prompt_lens": torch.empty(0, dtype=torch.long, device=device),
+                "old_logprobs": torch.empty(0, device=device),
+                "kls": torch.empty(0, device=device),
+                "values": torch.empty(0, device=device),
+                "rewards": torch.empty(0, device=device),
+            }
+        # Merge
+        full_ids     = torch.cat([b["full_ids"] for b in bufs], dim=0)
+        prompt_lens  = torch.cat([b["prompt_lens"] for b in bufs], dim=0)
+        old_logprobs = torch.cat([b["old_logprobs"] for b in bufs], dim=0)
+        kls          = torch.cat([b["kls"] for b in bufs], dim=0)
+        values       = torch.cat([b["values"] for b in bufs], dim=0)
+        rewards      = torch.cat([b["rewards"] for b in bufs], dim=0)
+        return {
+            "full_ids": full_ids,
+            "prompt_lens": prompt_lens,
+            "old_logprobs": old_logprobs,
+            "kls": kls,
+            "values": values,
+            "rewards": rewards,
+        }
+
+    # ------------------------ PPO Update ------------------------
+
+    def train(self, prompt_iterator: Iterable[List[str]], total_rollouts: Optional[int] = None) -> Dict[str, float]:
+        """Collect rollouts and perform PPO epochs with mini-batches."""
         self.model.train()
-        self.logger.info(f"Starting PPO training for {self.epochs} epochs")
-        
-        global_step = 0
-        
-        for epoch in range(1, self.epochs + 1):
-            epoch_metrics = {key: [] for key in self.training_history.keys()}
-            
-            for step, batch in enumerate(self.dataloader, start=1):
-                metrics = self.train_step(batch)
-                global_step += 1
-                
-                # Store metrics
-                for key, value in metrics.items():
-                    if key in epoch_metrics:
-                        epoch_metrics[key].append(value)
-                        self.training_history[key].append(value)
-                
-                # Logging
-                if step % self.logging_steps == 0:
-                    avg_metrics = {k: sum(v) / len(v) for k, v in epoch_metrics.items() if v}
-                    log_message = (
-                        f"Epoch {epoch} | Step {step} | "
-                        f"PPO Loss: {avg_metrics.get('ppo_losses', 0):.4f} | "
-                        f"Value Loss: {avg_metrics.get('value_losses', 0):.4f} | "
-                        f"Total Loss: {avg_metrics.get('total_losses', 0):.4f} | "
-                        f"Reward: {avg_metrics.get('rewards', 0):.4f} | "
-                        f"Value: {avg_metrics.get('values', 0):.4f} | "
-                        f"Advantage: {avg_metrics.get('advantages', 0):.4f} | "
-                        f"KL Div: {avg_metrics.get('kl_divergences', 0):.4f} | "
-                        f"Entropy: {avg_metrics.get('entropy', 0):.4f} | "
-                        f"Grad Norm: {avg_metrics.get('grad_norm', 0):.4f}"
+        tr_total = total_rollouts if total_rollouts is not None else self.cfg.total_rollouts
+
+        # Value warmup (uses fresh mini-rollouts; only value_head updated)
+        self._pretrain_value(_wrap_iterator(prompt_iterator), steps=self.cfg.pretrain_value_steps)
+
+        # Collect on-policy rollouts
+        buf = self.collect_rollouts(_wrap_iterator(prompt_iterator), cap=tr_total)
+        if buf["full_ids"].size(0) == 0:
+            return {"steps": 0}
+
+        full_ids     = buf["full_ids"]
+        prompt_lens  = buf["prompt_lens"]
+        old_logprobs = buf["old_logprobs"]
+        kls_store    = buf["kls"]
+        values       = buf["values"]
+        rewards      = buf["rewards"]
+
+        # -------- Reward normalization + returns --------
+        # normalize reward per buffer (z-score) and clip to reduce variance
+        r = rewards
+        r = (r - r.mean()) / (r.std() + 1e-8)
+        r = torch.clamp(r, -3.0, 3.0)
+        returns = r - self.cfg.beta_kl * kls_store           # [N]
+
+        # Advantages
+        advantages = returns - values.detach()                # [N]
+        if self.cfg.normalize_advantages and advantages.numel() >= 4:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = torch.clamp(advantages, -self.cfg.advantage_clip, self.cfg.advantage_clip)
+
+        N = full_ids.size(0)
+        indices = list(range(N))
+        accum = 0
+
+        huber = torch.nn.SmoothL1Loss()  # Huber for critic
+
+        for _ in range(self.cfg.ppo_epochs):
+            random.shuffle(indices)
+            for start in range(0, N, self.cfg.mini_batch_size):
+                mb_idx = indices[start : start + self.cfg.mini_batch_size]
+                mb = torch.tensor(mb_idx, device=self.policy_device)
+
+                mb_ids   = full_ids.index_select(0, mb)
+                mb_plens = prompt_lens.index_select(0, mb)
+                mb_old   = old_logprobs.index_select(0, mb)
+                mb_advs  = advantages.index_select(0, mb)
+                mb_vals  = values.index_select(0, mb)
+                mb_rets  = returns.index_select(0, mb)
+
+                # ---- Forward for logprobs + entropy + current values (per-sample loop keeps memory low) ----
+                new_lps_list, ent_list, cur_vals_list = [], [], []
+                for i in range(mb_ids.size(0)):
+                    pl = int(mb_plens[i].item())
+                    x = mb_ids[i : i + 1].to(self.policy_device)
+                    with torch.autocast(device_type="cuda", dtype=self._amp_dtype) if self._amp_enabled else _nullctx():
+                        logits_all = self.model(x[:, :-1]).logits
+                    out = self._slice_resp_from_logits(logits_all, x, pl)
+                    if out is None:
+                        new_lps_list.append(torch.tensor(0.0, device=self.policy_device))
+                        ent_list.append(torch.tensor(0.0, device=self.policy_device))
+                    else:
+                        resp_logits, resp_tokens = out
+                        logp = torch.log_softmax(resp_logits, dim=-1)
+                        tok_lp = torch.gather(logp, -1, resp_tokens.unsqueeze(-1)).squeeze(-1)  # [1, L]
+                        new_lps_list.append(tok_lp.mean(dim=-1).squeeze(0))
+
+                        probs = torch.softmax(resp_logits, dim=-1)
+                        ent = -(probs * logp).sum(dim=-1).mean(dim=-1)  # [1]
+                        ent_list.append(ent.squeeze(0))
+
+                    # Prompt value (no lm_head)
+                    cur_vals_list.append(self._prompt_value(x, pl).squeeze(0))
+
+                new_lps   = torch.stack(new_lps_list, dim=0)  # [B_m]
+                entropy   = torch.stack(ent_list, dim=0).mean()
+                cur_vals  = torch.stack(cur_vals_list, dim=0)  # [B_m]
+
+                # --- Recompute CURRENT KL for this minibatch (vs frozen ref) ---
+                kl_list = []
+                for i in range(mb_ids.size(0)):
+                    pl = int(mb_plens[i].item())
+                    x  = mb_ids[i : i + 1]
+                    kl_i = self._resp_token_kl_mean(x, pl)  # current policy vs ref
+                    kl_list.append(kl_i.squeeze(0))
+                kl_current = torch.stack(kl_list, dim=0).mean()
+
+                # Ratios and clipped policy loss + KL penalty
+                ratios = torch.exp(new_lps - mb_old)
+                eps = self.cfg.clip_epsilon
+                surr1 = ratios * mb_advs
+                surr2 = torch.clamp(ratios, 1.0 - eps, 1.0 + eps) * mb_advs
+                policy_loss = -(torch.min(surr1, surr2).mean())
+                policy_loss = policy_loss + self.cfg.beta_kl * kl_current  # KL penalty
+
+                # Value loss with Huber and optional clipping
+                if self.cfg.value_clip_epsilon and self.cfg.value_clip_epsilon > 0:
+                    clipped = mb_vals + torch.clamp(cur_vals - mb_vals,
+                                                    -self.cfg.value_clip_epsilon,
+                                                    self.cfg.value_clip_epsilon)
+                    v_loss_1 = huber(cur_vals, mb_rets)
+                    v_loss_2 = huber(clipped,  mb_rets)
+                    value_loss = torch.max(v_loss_1, v_loss_2)
+                else:
+                    value_loss = huber(cur_vals, mb_rets)
+
+                total_loss = policy_loss + self.cfg.value_coeff * value_loss - self.cfg.entropy_coeff * entropy
+
+                # Backprop with optional grad accumulation
+                (total_loss / self.cfg.gradient_accumulation_steps).backward()
+                accum += 1
+                step_now = (accum % self.cfg.gradient_accumulation_steps == 0)
+
+                if step_now:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        list(self.model.parameters()) + list(self.value_head.parameters()),
+                        self.cfg.max_grad_norm
                     )
-                    self.logger.info(log_message)
-                
-                # Save checkpoint
-                if global_step % self.save_steps == 0:
-                    self.save_checkpoint(global_step)
-            
-            # Epoch summary
-            avg_epoch_metrics = {k: sum(v) / len(v) for k, v in epoch_metrics.items()}
-            self.logger.info(f"Epoch {epoch} completed:")
-            for metric, value in avg_epoch_metrics.items():
-                self.logger.info(f"  {metric}: {value:.4f}")
-        
-        # Save final model
-        self.save_model()
-        self.save_training_history()
-        
-        self.logger.info("PPO training completed!")
-    
-    def save_checkpoint(self, step):
-        """Save model checkpoint."""
-        checkpoint_dir = f"{self.config['output']['model_dir']}/checkpoint-{step}"
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        self.model.save_pretrained(checkpoint_dir)
-        self.tokenizer.save_pretrained(checkpoint_dir)
-        
-        self.logger.info(f"Checkpoint saved at step {step}")
-    
-    def save_model(self):
-        """Save final model."""
-        output_dir = self.config["output"]["model_dir"]
-        os.makedirs(output_dir, exist_ok=True)
-        
-        self.model.save_pretrained(output_dir)
-        self.tokenizer.save_pretrained(output_dir)
-        
-        # Save config
-        with open(f"{output_dir}/config.json", "w") as f:
-            json.dump(self.config, f, indent=2)
-        
-        self.logger.info(f"Final model saved to {output_dir}")
-    
-    def save_training_history(self):
-        """Save training history."""
-        history_file = f"{self.config['output']['model_dir']}/training_history.json"
-        with open(history_file, "w") as f:
-            json.dump(self.training_history, f, indent=2)
-        
-        self.logger.info(f"Training history saved to {history_file}")
+                    self.policy_optim.step()
+                    self.value_optim.step()
+                    self.policy_optim.zero_grad(set_to_none=True)
+                    self.value_optim.zero_grad(set_to_none=True)
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                else:
+                    grad_norm = torch.tensor(float("nan"))
+
+                # Adaptive β driven by CURRENT KL
+                if self.cfg.adaptive_kl:
+                    avg_kl = float(kl_current.detach().cpu())
+                    if avg_kl > self.cfg.kl_target * 1.5:
+                        self.cfg.beta_kl = min(self.cfg.beta_kl * 1.5, 5e-1)
+                    elif avg_kl < self.cfg.kl_target / 1.5:
+                        self.cfg.beta_kl = max(self.cfg.beta_kl / 1.5, 1e-4)
+                else:
+                    avg_kl = float("nan")
+
+                # Logging
+                self.global_step += 1
+                if self.global_step % self.cfg.logging_steps == 0:
+                    self.training_history.append({
+                        "step": self.global_step,
+                        "policy_loss": float(policy_loss.detach().cpu()),
+                        "value_loss": float(value_loss.detach().cpu()),
+                        "total_loss": float(total_loss.detach().cpu()),
+                        "kl_divergence": float(avg_kl if math.isfinite(avg_kl) else 0.0),
+                        "entropy": float(entropy.detach().cpu()),
+                        "grad_norm": float(grad_norm.detach().cpu()) if torch.isfinite(grad_norm) else 0.0,
+                        "beta_kl": float(self.cfg.beta_kl),
+                    })
+
+            if self.cfg.clear_cache_between_epochs and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Aggregate metrics
+        if self.training_history:
+            keys = ["policy_loss", "value_loss", "total_loss", "kl_divergence", "entropy", "grad_norm"]
+            sums = {k: 0.0 for k in keys}
+            for m in self.training_history:
+                for k in keys:
+                    sums[k] += m[k]
+            n = len(self.training_history)
+            out = {k: (sums[k] / n) for k in keys}
+            out["steps"] = n
+            return out
+        else:
+            return {"steps": 0}
+
+    # ------------------------ Value warmup ------------------------
+
+    def _pretrain_value(self, iterator: Iterable[List[str]], steps: int):
+        """Quick value warmup using short fresh rollouts (no policy update)."""
+        if steps <= 0:
+            return
+        it = iter(iterator)
+        huber = torch.nn.SmoothL1Loss()
+        for _ in range(steps):
+            try:
+                prompts = next(it)
+            except StopIteration:
+                break
+            buf = self._collect_one_batch(prompts)
+            if buf["full_ids"].numel() == 0:
+                continue
+
+            # Reward normalization (same as main)
+            r = buf["rewards"]
+            r = (r - r.mean()) / (r.std() + 1e-8)
+            r = torch.clamp(r, -3.0, 3.0)
+            returns = r - self.cfg.beta_kl * buf["kls"]  # [B]
+
+            # current values (grad enabled) — CLONE to avoid 'inference' tensors
+            v_list = []
+            for i in range(buf["full_ids"].size(0)):
+                pl = int(buf["prompt_lens"][i].item())
+                seq = buf["full_ids"][i : i + 1].clone()
+                v_list.append(self._prompt_value(seq, pl).squeeze(0))
+            values = torch.stack(v_list, dim=0)  # [B]
+
+            v_loss = huber(values, returns)
+            self.value_optim.zero_grad(set_to_none=True)
+            v_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.value_head.parameters(), self.cfg.max_grad_norm)
+            self.value_optim.step()
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
-def run_ppo_training(config_path: str):
-    """Run PPO training with given configuration."""
-    from utils.config_loader import load_config
-    
-    config = load_config(config_path)
-    trainer = PPOPreferenceTrainer(config)
-    return trainer.train()
+# ============================= Helpers =============================
+
+class _nullctx:
+    def __enter__(self): return None
+    def __exit__(self, *args): return False
 
 
-if __name__ == "__main__":
-    import sys
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/ppo_preference.yaml"
-    run_ppo_training(config_path)
+def prompt_loader_from_dataset(dataset: Any, batch_size: int) -> Iterable[List[str]]:
+    """
+    Yields lists of prompt strings of size `batch_size`.
+    Supports:
+      • dataset.prompts : List[str]
+      • iterable of dicts with "prompt"
+      • iterable of raw strings
+    """
+    batch: List[str] = []
+    if hasattr(dataset, "prompts"):
+        for p in dataset.prompts:
+            if p is None:
+                continue
+            batch.append(p)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+    else:
+        for ex in dataset:
+            prompt = ex.get("prompt") if isinstance(ex, dict) else (ex if isinstance(ex, str) else None)
+            if prompt is None:
+                continue
+            batch.append(prompt)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+
+
+def _wrap_iterator(it: Iterable[List[str]]) -> Iterable[List[str]]:
+    """Return the iterator as-is (callers should pass a fresh iterator when needed)."""
+    return it

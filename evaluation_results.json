@@ -1,0 +1,34 @@
+{
+  "prompts": [
+    "Human: What is the capital of France?\n\nAssistant:",
+    "Human: How can I help someone who is feeling sad?\n\nAssistant:",
+    "Human: Explain quantum computing in simple terms.\n\nAssistant:",
+    "Human: What are the benefits of exercise?\n\nAssistant:",
+    "Human: How do I make a good first impression?\n\nAssistant:"
+  ],
+  "responses": [
+    "The capital city of Paris was named in honour of Jean-Marie Le Pen who wrote \u201cLe Capitaine de la vie\u201d. The French capital will soon be renamed to honor Marie-Antoinette, Louis XVII (1689\u20131738), a Catholic saint and her mother \u2013 Mary Tudyke, Duchess of Meaux. In order to avoid confusion with another",
+    "What is the worst part of your life? Do you think you are doing something wrong? Why do you feel like you\u2019re doing it wrong. Can you explain to me how this feels? I don\u201dt want to answer that, but I need to know what you mean by \u201cbad\u2018ness\u2016 and whether you believe in God. A person could say things",
+    "I don't want to hear your argument here. This is a good example of the use of quantum computers, which are being deployed by Apple, Google and Facebook, to create applications that you can use for real-world purposes. For example, this is one of our favorite things to do with Apple devices. There's no reason why you need a phone or computer to be able to program quantum mechanics",
+    "Exercise is a form of physical therapy. It\u2019s not just about walking or running, but it\u2018s also for everyone. Exercise improves memory, mood, and learning skills. And you can get in shape from your own body. Read more\u2026 \u2013 How to Get In Shape What does exercise really mean to you? What is the main reason you want to become a doctor",
+    "Well, my name is Andrew D. My background is in electronic music and the arts. I have studied music with Mike Gentry, Michael Jaskin and Alan Lachman. My husband, Chris Dabbs, has worked for The New York Times. They are two of the best composers in the world. He was born in New Orleans to American parents. His mother was African"
+  ],
+  "quality_metrics": {
+    "bleu": 0.0,
+    "rouge": 0.0,
+    "bertscore": 0.0,
+    "avg_response_length": 66.0,
+    "avg_reward_score": 1.4205849170684814,
+    "reward_std": 0.697676420211792
+  },
+  "reward_scores": [
+    -1.2655556201934814,
+    -3.550854444503784,
+    0.8081670999526978,
+    1.9038952589035034,
+    0.6774722337722778
+  ],
+  "average_reward_score": -0.2853750944137573,
+  "response_quality_score": 0.0,
+  "average_perplexity": 0.0
+}

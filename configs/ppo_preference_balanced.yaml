@@ -1,0 +1,88 @@
+model: EleutherAI/gpt-neo-125M
+reward_model_dir: models/reward_model_preference_balanced  # Use balanced reward model
+
+dataset:
+  loader: preference
+  name: Anthropic/hh-rlhf
+  subset_size: 300            # Increased from 100, compromise from 500
+  max_seq_length: 128         # Hard cap for safety; PPO will still use dynamic padding at runtime
+  clean: true
+  tokenizer:
+    padding: longest          # ⬅️ switch to dynamic padding for CPU/GPU efficiency
+    truncation: true
+    return_tensors: pt
+
+training:
+  epochs: 2
+  batch_size: 2               # (used by your loader; PPO uses rollout/minibatch below)
+
+  # PROPER PPO: Reasonable learning rates for on-policy training
+  policy_learning_rate: 3e-6  # Standard for PPO on 125M model
+  value_learning_rate: 2e-5   # 2x higher than policy
+
+  # VALUE FUNCTION PRE-TRAINING
+  pretrain_value_steps: 15
+  warmup_steps: 20
+
+  # ON-POLICY GENERATION PARAMETERS
+  rollout_batch_size: 2      # ⬅️ up from 4 for better batch stats
+  total_rollouts: 64          # ⬅️ collect this many prompts per PPO run
+  max_new_tokens: 24
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true             # ⬅️ ensure sampling (on-policy)
+
+  # PPO update settings
+  ppo_epochs: 2
+  mini_batch_size: 2          # ⬅️ up from 2 so advantage norm is meaningful
+  clip_epsilon: 0.08
+  entropy_coeff: 0.005
+  entropy_decay: 1.0
+  logging_steps: 10           # ⬅️ less spammy, still informative
+  save_steps: 25
+  max_grad_norm: 1.0
+
+  # Advantage / value settings
+  value_clip_epsilon: 0.2
+  normalize_advantages: true
+  advantage_clip: 5.0
+  value_coeff: 0.5            # ⬅️ restore balanced weight on value term
+
+  # KL divergence control vs reference model
+  kl_target: 0.01             # ⬅️ stabilize around a small positive KL
+  beta_kl: 0.005
+  adaptive_kl: true
+
+  # (GAE params kept for compatibility; bandit-style PPO won’t use them)
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  # Balanced memory optimizations
+  gradient_accumulation_steps: 2
+  mixed_precision: true       # GTX 1650-friendly
+  dataloader_num_workers: 1
+  pin_memory: false
+
+gen:
+  max_new_tokens: 24
+  temperature: 0.8
+  top_p: 0.9
+  do_sample: true
+  use_cache: false
+
+optimization:
+  # Conservative optimizations for stability
+  gradient_checkpointing: false
+  attention_slicing: false
+
+  # Memory management (lighter approach)
+  clear_cache_between_epochs: true
+
+  # Device placement
+  policy_on_gpu: true
+  reward_model_on_cpu: true      # Keep RM on CPU during PPO
+  reference_policy_on_cpu: true  # Keep ref policy on CPU
+
+output:
+  model_dir: models/ppo_preference_balanced
+  log_dir: logs/ppo_training_balanced
