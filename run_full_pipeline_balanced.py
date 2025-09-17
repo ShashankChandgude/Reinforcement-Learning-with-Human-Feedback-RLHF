@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import json
+import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -55,9 +56,49 @@ def has_model_artifacts(folder: str) -> bool:
     return bool(names & files)
 
 
+def parse_args():
+    """Parse command-line arguments for phase selection."""
+    parser = argparse.ArgumentParser(
+        description='RLHF Pipeline Runner - Run individual phases or complete pipeline',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python run_full_pipeline_balanced.py --phase reward     # Train reward model only
+  python run_full_pipeline_balanced.py --phase lora       # LoRA fine-tuning only
+  python run_full_pipeline_balanced.py --phase ppo        # PPO training only
+  python run_full_pipeline_balanced.py --phase supervised # Supervised RLHF only
+  python run_full_pipeline_balanced.py --phase eval       # Evaluation only
+  python run_full_pipeline_balanced.py --phase full       # Complete pipeline (default)
+  python run_full_pipeline_balanced.py                    # Same as --phase full
+        """
+    )
+    
+    parser.add_argument(
+        '--phase',
+        choices=['reward', 'lora', 'ppo', 'supervised', 'eval', 'full'],
+        default='full',
+        help='Phase to run (default: full)'
+    )
+    
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force retraining even if model artifacts exist'
+    )
+    
+    parser.add_argument(
+        '--list-phases',
+        action='store_true',
+        help='List available phases and exit'
+    )
+    
+    return parser.parse_args()
+
+
 class FullPipelineRunner:
-    def __init__(self):
+    def __init__(self, force_retrain: bool = False):
         self.logger = setup_logger("full_pipeline")
+        self.force_retrain = force_retrain
         self.results = {
             "pipeline_start_time": time.time(),
             "phases_completed": [],
@@ -102,7 +143,7 @@ class FullPipelineRunner:
     def phase_1_reward_model(self) -> bool:
         try:
             self.print_banner("PHASE 1: BALANCED REWARD MODEL", "Target: ~90% accuracy")
-            if has_model_artifacts(self.model_paths["reward_model"]):
+            if has_model_artifacts(self.model_paths["reward_model"]) and not self.force_retrain:
                 self.logger.info("Reward model already exists, skipping training")
                 self.print_phase_result("Reward Model", True, {
                     "Status": "Existing model used",
@@ -141,7 +182,7 @@ class FullPipelineRunner:
             t0 = time.time()
             out_dir = self.model_paths["lora"]
 
-            if os.path.exists(out_dir) and os.listdir(out_dir):
+            if os.path.exists(out_dir) and os.listdir(out_dir) and not self.force_retrain:
                 self.logger.info("LoRA model already exists, skipping")
                 self.print_phase_result("LoRA Training", True, {
                     "Status": "Existing model used",
@@ -185,7 +226,7 @@ class FullPipelineRunner:
 
             # NEW: cache check
             ppo_dir = self.model_paths["ppo"]
-            if has_model_artifacts(ppo_dir):
+            if has_model_artifacts(ppo_dir) and not self.force_retrain:
                 self.logger.info("PPO model already exists, skipping")
                 self.print_phase_result("PPO Training", True, {
                     "Status": "Existing model used",
@@ -287,7 +328,7 @@ class FullPipelineRunner:
 
             # NEW: cache check
             sup_dir = self.model_paths["supervised"]
-            if has_model_artifacts(sup_dir):
+            if has_model_artifacts(sup_dir) and not self.force_retrain:
                 self.logger.info("Supervised RLHF model already exists, skipping")
                 self.print_phase_result("Supervised RLHF", True, {
                     "Status": "Existing model used",
@@ -295,7 +336,7 @@ class FullPipelineRunner:
                     "Time": "0 minutes (cached)",
                 })
                 self.results["phases_completed"].append("supervised_rlhf_cached")
-                # If PPO didn’t succeed, use supervised as final
+                # If PPO didn't succeed, use supervised as final
                 if not self.results.get("final_model_path"):
                     self.results["final_model_path"] = sup_dir
                 self.results["performance_metrics"]["supervised_success"] = True
@@ -458,6 +499,63 @@ class FullPipelineRunner:
 
         print("=" * 100)
 
+    def validate_phase_dependencies(self, phase: str) -> bool:
+        """Validate that required dependencies exist for the given phase."""
+        if phase == "reward":
+            return True  # No dependencies
+        
+        elif phase == "lora":
+            return True  # No dependencies (uses base model)
+        
+        elif phase == "ppo":
+            # Requires reward model
+            if not has_model_artifacts(self.model_paths["reward_model"]):
+                self.logger.error("PPO phase requires reward model. Run --phase reward first.")
+                return False
+            return True
+        
+        elif phase == "supervised":
+            # Requires reward model
+            if not has_model_artifacts(self.model_paths["reward_model"]):
+                self.logger.error("Supervised RLHF phase requires reward model. Run --phase reward first.")
+                return False
+            return True
+        
+        elif phase == "eval":
+            # Requires at least one trained model
+            ppo_exists = has_model_artifacts(self.model_paths["ppo"])
+            sup_exists = has_model_artifacts(self.model_paths["supervised"])
+            if not ppo_exists and not sup_exists:
+                self.logger.error("Evaluation phase requires at least one trained model. Run --phase ppo or --phase supervised first.")
+                return False
+            return True
+        
+        elif phase == "full":
+            return True  # No validation needed for full pipeline
+        
+        return True
+
+    def run_phase(self, phase: str) -> bool:
+        """Run a specific phase with dependency validation."""
+        if not self.validate_phase_dependencies(phase):
+            return False
+        
+        if phase == "reward":
+            return self.phase_1_reward_model()
+        elif phase == "lora":
+            return self.phase_2_lora_training()
+        elif phase == "ppo":
+            return self.phase_3_ppo_training()
+        elif phase == "supervised":
+            return self.phase_4_supervised_rlhf()
+        elif phase == "eval":
+            return self.phase_5_model_evaluation()
+        elif phase == "full":
+            return self.run()
+        else:
+            self.logger.error(f"Unknown phase: {phase}")
+            return False
+
     def run(self) -> bool:
         self.print_banner(
             "COMPLETE BALANCED RLHF PIPELINE",
@@ -502,15 +600,55 @@ class FullPipelineRunner:
         return bool(self.results.get("final_model_path")) and (ppo_ok or sup_ok) and eval_ok
 
 
-def main():
-    print("Starting Complete Balanced RLHF Pipeline...")
-    print("Hardware: GTX 1650 4GB optimized")
-    print("Approach: Balanced configurations with intelligent fallbacks\n")
+def list_phases():
+    """List available phases and their descriptions."""
+    phases = {
+        "reward": "Train reward model from preference data (Bradley-Terry loss)",
+        "lora": "LoRA fine-tuning for parameter efficiency",
+        "ppo": "PPO training with on-policy rollouts (requires reward model)",
+        "supervised": "Supervised RLHF with reward-ranked examples (requires reward model)",
+        "eval": "Comprehensive model evaluation (requires trained model)",
+        "full": "Complete pipeline: reward -> lora -> ppo/supervised -> eval"
+    }
+    
+    print("Available RLHF Pipeline Phases:")
+    print("=" * 50)
+    for phase, description in phases.items():
+        print(f"  {phase:12} - {description}")
+    print("\nUsage: python run_full_pipeline_balanced.py --phase <phase_name>")
+    print("Example: python run_full_pipeline_balanced.py --phase reward")
 
-    runner = FullPipelineRunner()
-    ok = runner.run()
-    print("\n" + ("SUCCESS: Complete RLHF pipeline finished with production-ready model!" if ok
-                 else "Pipeline failed. Check logs for details."))
+
+def main():
+    args = parse_args()
+    
+    # Handle list-phases option
+    if args.list_phases:
+        list_phases()
+        return True
+    
+    # Print phase-specific banner
+    if args.phase == "full":
+        print("Starting Complete Balanced RLHF Pipeline...")
+        print("Hardware: GTX 1650 4GB optimized")
+        print("Approach: Balanced configurations with intelligent fallbacks\n")
+    else:
+        print(f"Starting RLHF Pipeline - Phase: {args.phase.upper()}")
+        print("Hardware: GTX 1650 4GB optimized")
+        if args.force:
+            print("Force retrain: ENABLED (will retrain even if models exist)")
+        print()
+
+    runner = FullPipelineRunner(force_retrain=args.force)
+    
+    if args.phase == "full":
+        ok = runner.run()
+        success_msg = "SUCCESS: Complete RLHF pipeline finished with production-ready model!"
+    else:
+        ok = runner.run_phase(args.phase)
+        success_msg = f"SUCCESS: {args.phase.upper()} phase completed successfully!"
+    
+    print("\n" + (success_msg if ok else "FAILED: Check logs for details."))
     return ok
 
 
