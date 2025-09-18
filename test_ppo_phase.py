@@ -20,9 +20,9 @@ except Exception as _e:
 # Imports after the early banner
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from utils.config_loader import load_config
-from training.reward_model import RewardModel
+from training.Reward_Model.reward_model import RewardModel
 from data.data_loader import load_dataset
-from training.ppo_preference_trainer import (
+from training.PPO_trainer.ppo_preference_trainer import (
     PPOPreferenceTrainer,
     build_config_from_yaml,
     prompt_loader_from_dataset,

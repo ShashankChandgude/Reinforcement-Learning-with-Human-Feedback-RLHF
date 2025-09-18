@@ -1,0 +1,110 @@
+# Refactored Balanced Reward Trainer Configuration Example
+# This configuration demonstrates the full capabilities of the refactored trainer
+
+# Model configuration
+model: "EleutherAI/gpt-neo-125M"
+torch_dtype: "float32"
+device: "auto"
+force_cpu: false
+
+# Dataset configuration
+dataset:
+  name: "preference_dataset"
+  subset_size: 1000
+  max_seq_length: 512
+  batch_size: 2
+  dataloader_num_workers: 2
+  pin_memory: true
+  shuffle: true
+
+# Training configuration
+training:
+  epochs: 5
+  learning_rate: 3e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  mixed_precision: false
+  logging_steps: 15
+  
+  # Loss strategy configuration
+  loss:
+    strategy: "bradley_terry"  # Options: bradley_terry, hinge, log_sigmoid
+    parameters:
+      margin: 0.5
+
+# Optimization configuration
+optimization:
+  gradient_checkpointing: false
+  cudnn_benchmark: true
+  cudnn_deterministic: false
+  clear_cache_on_start: true
+  clear_cache_between_epochs: false
+  memory_fraction: null
+  compile_model: false
+
+# Device configuration
+device_config:
+  cuda_benchmark: true
+  cuda_deterministic: false
+
+# Output configuration
+output:
+  model_dir: "models/refactored_reward_model"
+  log_file: "logs/refactored_training.log"
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/refactored_training.log"
+  console: true
+
+# Monitoring configuration
+monitoring:
+  enable_metrics: true
+  enable_progress_tracking: true
+  enable_file_logging: true
+  enable_console_logging: true
+
+# Validation configuration
+validation:
+  validate_dataset: true
+  validate_batch: true
+  strict_validation: false
+
+# Memory management
+memory:
+  clear_cache_frequency: 10  # Clear cache every N steps
+  max_memory_usage: 0.8  # Maximum GPU memory usage (0.0-1.0)
+  cleanup_on_error: true
+
+# Performance optimization
+performance:
+  enable_compilation: false
+  optimize_dataloader: true
+  pin_memory: true
+  non_blocking_transfer: true
+
+# Error handling
+error_handling:
+  max_retries: 3
+  retry_delay: 1.0
+  continue_on_error: false
+  log_errors: true
+
+# Checkpointing
+checkpointing:
+  save_frequency: 1  # Save every N epochs
+  max_checkpoints: 3
+  save_best_model: true
+  save_optimizer_state: true
+
+# Advanced features
+advanced:
+  enable_amp: false
+  enable_compile: false
+  enable_profiling: false
+  profile_steps: 10

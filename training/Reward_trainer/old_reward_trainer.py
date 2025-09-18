@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
 from data.data_loader import load_dataset
-from training.reward_model import RewardModel
+from training.Reward_Model.reward_model import RewardModel
 from utils.logging_utils import setup_logger
 
 

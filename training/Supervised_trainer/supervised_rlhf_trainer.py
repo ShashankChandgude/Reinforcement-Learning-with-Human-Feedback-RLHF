@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments,
 from transformers.trainer_utils import EvalPrediction
 from torch.utils.data import Dataset
 from data.data_loader import load_dataset
-from training.reward_model import RewardModel
+from training.Reward_Model.reward_model import RewardModel
 from utils.logging_utils import setup_logger
 from typing import Dict, Any, List, Tuple
 import json

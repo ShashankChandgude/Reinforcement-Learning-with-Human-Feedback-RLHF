@@ -27,7 +27,7 @@ sys.path.append(str(project_root))
 
 from utils.config_loader import load_config
 from evaluation.rlhf_evaluator import run_rlhf_evaluation
-from training.reward_model import RewardModel
+from training.Reward_Model.reward_model import RewardModel
 
 class RLHFDemo:
     """Interactive RLHF demonstration application."""

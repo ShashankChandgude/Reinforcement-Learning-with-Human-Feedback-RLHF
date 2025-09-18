@@ -6,7 +6,7 @@ import torch
 import json
 from typing import List, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from training.reward_model import RewardModel
+from training.Reward_Model.reward_model import RewardModel
 from evaluation.eval_metrics import compute_all
 
 
@@ -75,7 +75,7 @@ class RLHFEvaluator:
                 base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
                 
                 # Recreate reward model architecture
-                from training.reward_model import RewardModel
+                from training.Reward_Model.reward_model import RewardModel
                 self.reward_model = RewardModel(base_model).to(self.device)
                 self.reward_model.load_state_dict(reward_state)
                 self.reward_model.eval()

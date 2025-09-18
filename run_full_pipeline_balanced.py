@@ -27,11 +27,11 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # Trainers
-from training.balanced_reward_trainer import BalancedRewardTrainer
-from training.simple_lora_trainer import SimpleLoRATrainer
-from training.ppo_preference_trainer import PPOPreferenceTrainer, PPOConfig
-from training.supervised_rlhf_trainer import SupervisedRLHFTrainer
-from training.reward_model import RewardModel
+from training.Reward_trainer.refactored_balanced_trainer import RefactoredBalancedRewardTrainer
+from training.LoRA_trainer.simple_lora_trainer import SimpleLoRATrainer
+from training.PPO_trainer.ppo_preference_trainer import PPOPreferenceTrainer, PPOConfig
+from training.Supervised_trainer.supervised_rlhf_trainer import SupervisedRLHFTrainer
+from training.Reward_Model.reward_model import RewardModel
 
 # Evaluation
 from evaluation.rlhf_evaluator import RLHFEvaluator  # evaluate_model_quality(prompts, references)  :contentReference[oaicite:1]{index=1}
@@ -142,7 +142,7 @@ class FullPipelineRunner:
     # -------- PHASE 1: Reward model --------
     def phase_1_reward_model(self) -> bool:
         try:
-            self.print_banner("PHASE 1: BALANCED REWARD MODEL", "Target: ~90% accuracy")
+            self.print_banner("PHASE 1: REFACTORED BALANCED REWARD MODEL", "Target: ~90% accuracy with advanced monitoring")
             if has_model_artifacts(self.model_paths["reward_model"]) and not self.force_retrain:
                 self.logger.info("Reward model already exists, skipping training")
                 self.print_phase_result("Reward Model", True, {
@@ -155,17 +155,26 @@ class FullPipelineRunner:
 
             t0 = time.time()
             cfg = load_config(self.configs["reward_model"])
-            trainer = BalancedRewardTrainer(cfg)
+            trainer = RefactoredBalancedRewardTrainer(cfg)
             res = trainer.train()
             dt = time.time() - t0
+            
+            # Cleanup refactored trainer resources
+            trainer.cleanup()
 
+            # Handle refactored trainer results format
+            final_metrics = res.get("final_metrics", {})
+            accuracy = final_metrics.get("preference_accuracy", 0.0) * 100 if final_metrics else 0.0
+            
             self.print_phase_result("Reward Model", True, {
-                "Final Accuracy": f"{res.get('final_accuracy', 0):.1f}%",
+                "Final Accuracy": f"{accuracy:.1f}%",
                 "Training Time": f"{dt/60:.1f} minutes",
                 "Model Path": self.model_paths["reward_model"],
+                "Epochs Completed": res.get("epochs_completed", 0),
+                "Training Completed": res.get("training_completed", False),
             })
             self.results["phases_completed"].append("reward_model")
-            self.results["performance_metrics"]["reward_accuracy"] = res.get("final_accuracy", 0.0)
+            self.results["performance_metrics"]["reward_accuracy"] = accuracy
             self.results["total_training_time"] += dt
             return True
 
@@ -246,7 +255,7 @@ class FullPipelineRunner:
                 **(load_config(self.configs["ppo"]).get("ppo_patch", {})),  # optional patching
             })
             # Build config from YAML properly
-            from training.ppo_preference_trainer import build_config_from_yaml
+            from training.PPO_trainer.ppo_preference_trainer import build_config_from_yaml
             ppo_cfg = build_config_from_yaml(cfg_dict)
 
             tok = AutoTokenizer.from_pretrained(ppo_cfg.model_name)
@@ -558,12 +567,12 @@ class FullPipelineRunner:
 
     def run(self) -> bool:
         self.print_banner(
-            "COMPLETE BALANCED RLHF PIPELINE",
-            "Reward Model -> LoRA -> PPO/Supervised RLHF",
+            "COMPLETE BALANCED RLHF PIPELINE (REFACTORED)",
+            "Refactored Reward Model -> LoRA -> PPO/Supervised RLHF",
             width=100,
         )
         print("Pipeline Phases:")
-        print("  1. Balanced Reward Model")
+        print("  1. Refactored Balanced Reward Model (with advanced monitoring)")
         print("  2. Improved LoRA Training")
         print("  3. PPO Training (gradient-safe)")
         print("  4. Supervised RLHF (fallback or comparison)")

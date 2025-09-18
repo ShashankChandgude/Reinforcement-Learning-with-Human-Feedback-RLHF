@@ -1,39 +1,120 @@
 # Balanced reward model training - Best of both worlds
 # Targets 88-92% accuracy while maintaining GPU efficiency
-model: EleutherAI/gpt-neo-125M
+# Updated with refactored trainer capabilities while preserving optimized values
 
+# Model configuration
+model: EleutherAI/gpt-neo-125M
+torch_dtype: float32
+device: auto
+force_cpu: false
+
+# Dataset configuration (preserving optimized values)
 dataset:
   loader: preference
   name: anthropic/hh-rlhf
   subset_size: 300  # Increased from 100, compromise from 500
   max_seq_length: 224  # Increased from 192, compromise from 256
   clean: true
+  batch_size: 2  # Increased from 1 for better learning
+  dataloader_num_workers: 2  # Parallel data loading
+  pin_memory: true  # Faster transfers
+  shuffle: true
   tokenizer:
     padding: max_length
     truncation: true
 
+# Training configuration (preserving optimized values)
 training:
   epochs: 5  # Keep same as both models
-  batch_size: 2  # Increased from 1 for better learning
-  gradient_accumulation_steps: 4  # Reduced from 8, effective batch = 8
   learning_rate: 3e-5  # Same as both models
-  logging_steps: 15  # More frequent than optimized
-  margin: 0.5
-  # Balanced GPU optimizations
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  gradient_accumulation_steps: 4  # Reduced from 8, effective batch = 8
+  max_grad_norm: 1.0
   mixed_precision: false  # Keep fp32 for GTX 1650 stability
-  dataloader_num_workers: 2  # Parallel data loading
-  pin_memory: true  # Faster transfers
+  logging_steps: 15  # More frequent than optimized
   use_cache: true  # Enable cache for better efficiency (vs optimized)
+  
+  # Loss strategy configuration (using existing margin value)
+  loss:
+    strategy: bradley_terry  # Options: bradley_terry, hinge, log_sigmoid
+    parameters:
+      margin: 0.5  # Preserving existing optimized value
 
+# Optimization configuration (preserving optimized values)
 optimization:
   # Reduced memory optimizations for better learning
   gradient_checkpointing: false  # DISABLED - was hurting accuracy
   attention_slicing: false  # DISABLED - may fragment patterns
-  # Keep speed optimizations
+  cudnn_benchmark: true
+  cudnn_deterministic: false
+  clear_cache_on_start: true
+  clear_cache_between_epochs: true  # Only between epochs, not batches
+  memory_fraction: null
   compile_model: false  # Skip compilation overhead
   use_fast_tokenizer: true
-  # Memory management (lighter than optimized)
-  clear_cache_between_epochs: true  # Only between epochs, not batches
 
+# Device configuration
+device_config:
+  cuda_benchmark: true
+  cuda_deterministic: false
+
+# Output configuration (preserving existing model directory)
 output:
   model_dir: models/reward_model_preference_balanced
+  log_file: logs/balanced_training.log
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: logs/balanced_training.log
+  console: true
+
+# Monitoring configuration
+monitoring:
+  enable_metrics: true
+  enable_progress_tracking: true
+  enable_file_logging: true
+  enable_console_logging: true
+
+# Validation configuration
+validation:
+  validate_dataset: true
+  validate_batch: true
+  strict_validation: false
+
+# Memory management
+memory:
+  clear_cache_frequency: 10  # Clear cache every N steps
+  max_memory_usage: 0.8  # Maximum GPU memory usage (0.0-1.0)
+  cleanup_on_error: true
+
+# Performance optimization
+performance:
+  enable_compilation: false
+  optimize_dataloader: true
+  pin_memory: true
+  non_blocking_transfer: true
+
+# Error handling
+error_handling:
+  max_retries: 3
+  retry_delay: 1.0
+  continue_on_error: false
+  log_errors: true
+
+# Checkpointing
+checkpointing:
+  save_frequency: 1  # Save every N epochs
+  max_checkpoints: 3
+  save_best_model: true
+  save_optimizer_state: true
+
+# Advanced features
+advanced:
+  enable_amp: false
+  enable_compile: false
+  enable_profiling: false
+  profile_steps: 10
